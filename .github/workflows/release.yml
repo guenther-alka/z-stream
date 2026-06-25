@@ -1,67 +1,4 @@
-name: Build and Release
-
-on:
-  push:
-    tags:
-      - 'v*'
-
-jobs:
-  build:
-    name: Build zstream
-    runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            output: zstream-linux-amd64
-          - goos: linux
-            goarch: arm64
-            output: zstream-linux-arm64
-          - goos: windows
-            goarch: amd64
-            output: zstream-windows-amd64.exe
-          - goos: freebsd
-            goarch: amd64
-            output: zstream-freebsd-amd64
-          - goos: solaris
-            goarch: amd64
-            output: zstream-solaris-amd64
-          - goos: darwin
-            goarch: amd64
-            output: zstream-darwin-amd64
-          - goos: darwin
-            goarch: arm64
-            output: zstream-darwin-arm64
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-
-      - name: Build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-        run: |
-          go build -v \
-            -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
-            -o ${{ matrix.output }} \
-            .
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.output }}
-          path: ${{ matrix.output }}
-
-  release:
+release:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
@@ -76,42 +13,7 @@ jobs:
       - name: List artifacts
         run: ls -lh artifacts/
 
-      - name: Create Release
+      - name: Upload binaries to existing release
         uses: softprops/action-gh-release@v2
         with:
-          name: zstream ${{ github.ref_name }}
-          body: |
-            ## zstream ${{ github.ref_name }}
-
-            Encrypted TCP stream transport for ZFS replication (replaces netcat).
-            Used by napp-it csweb-gui job-replicate for encrypted ZFS send/receive.
-
-            ### Downloads
-
-            | Platform | File |
-            |----------|------|
-            | Linux x86_64 | `zstream-linux-amd64` |
-            | Linux ARM64 | `zstream-linux-arm64` |
-            | Windows x86_64 | `zstream-windows-amd64.exe` |
-            | FreeBSD x86_64 | `zstream-freebsd-amd64` |
-            | OmniOS/Solaris x86_64 | `zstream-solaris-amd64` |
-            | macOS x86_64 | `zstream-darwin-amd64` |
-            | macOS Apple Silicon | `zstream-darwin-arm64` |
-
-            ### Usage
-            ```
-            # Receiver (start first):
-            zstream listen 9000 SESSIONKEY | zfs receive -F tank/backup
-
-            # Sender:
-            zfs send tank@snap | zstream send 192.168.1.10 9000 SESSIONKEY
-            ```
-
-            ### Install (csweb-gui)
-            Download the binary for your platform and place it in:
-            - Linux/OmniOS/BSD: `/opt/csweb-gui/_cfg/s3/bin/zstream`
-            - Windows: `C:\opt\csweb-gui\_cfg\s3\bin\zstream.exe`
-            - chmod +x on Linux/BSD/OmniOS
           files: artifacts/*
-          draft: false
-          prerelease: false
