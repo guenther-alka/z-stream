@@ -13,7 +13,7 @@ jobs:
     name: Build zstream
     runs-on: ubuntu-latest
 
-    strategy:
+        strategy:
       matrix:
         include:
           - goos: linux
@@ -31,13 +31,15 @@ jobs:
           - goos: solaris
             goarch: amd64
             output: zstream-solaris-amd64
+          - goos: illumos
+            goarch: amd64
+            output: zstream-illumos-amd64
           - goos: darwin
             goarch: amd64
             output: zstream-darwin-amd64
           - goos: darwin
             goarch: arm64
             output: zstream-darwin-arm64
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
