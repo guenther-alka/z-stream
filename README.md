@@ -74,7 +74,7 @@ See `zstream.info` for full documentation.
 
 ## License
 
-BSD 2-Clause License â€” Copyright (c) 2026 Guenther Alka / napp-it.org
+BSD 2-Clause License” Copyright (c) 2026 Guenther Alka / napp-it.org
 
 Redistribution in source or binary form requires retaining the copyright notice.
 See [LICENSE](LICENSE) for full terms.
