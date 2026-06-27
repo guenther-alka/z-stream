@@ -1,343 +1,75 @@
+# zstream
 
-  zstream -- Encrypted TCP Stream Transport for ZFS Replication
-  Replaces netcat (nc) in job-replicate.pl
-  Repository: https://github.com/guenther-alka/zstream
-  Version:    1.1.0
-===================
-
-===================
-  1. PURPOSE
-===================
-  zstream is a minimal cross-platform binary that replaces netcat (nc) in
-  ZFS send/receive replication pipelines. Unlike nc, zstream encrypts the
-  stream using AES-256-GCM authenticated encryption.
-
-  Additional features (v1.1.0):
-  - Read-ahead buffer (default 128 MB) smooths ZFS send bursts
-  - Optional throughput rate limiting for shared links
-  - Live progress display (optional, --progress)
-  - Transfer summary on stderr + optional log file (--log=FILE)
-
-  Usage is identical to nc from job-replicate.pl's perspective:
-
-    nc equivalent (unencrypted):
-      Receiver: nc -l -p 9000 | zfs receive -F tank/backup
-      Sender:   zfs send tank@snap | nc 192.168.1.10 9000
-
-    zstream (encrypted, defaults):
-      Receiver: zstream listen 9000 SESSIONKEY | zfs receive -F tank/backup
-      Sender:   zfs send tank@snap | zstream send 192.168.1.10 9000 SESSIONKEY
-
-    zstream (rate-limited, with progress and log):
-      Sender:   zfs send tank@snap | zstream send 192.168.1.10 9000 SESSIONKEY --rate=100m --progress --log=/tmp/zstream.log
-
-  The session key is generated per-transfer by job-replicate.pl:
-    sha256_hex(time . $$ . $source_ip . $dest_ip . $snap)
-  It is passed to both sides via the existing server.pl socket commands.
-  No key management needed in zstream itself.
-
-===================
-  2. ENCRYPTION
-===================
-  Algorithm:   AES-256-GCM (authenticated encryption)
-  Key:         SHA-256(session_key_string) -> 32 bytes
-  Nonce:       12 bytes random per chunk (crypto/rand)
-  Chunk size:  64 KB plaintext per independently encrypted chunk
-  Wire format: [4B length BE][12B nonce][ciphertext][16B GCM tag]
-               Zero-length chunk (4 zero bytes) = end of stream
-
-  AES-256-GCM properties:
-  - Confidentiality: stream cannot be read without the key
-  - Integrity/Auth:  any bit flip or truncation is detected (GCM tag)
-  - No padding: stream length is preserved exactly
-  - Per-chunk nonces: random, no counter reuse risk
-
-  Performance:
-  - Go stdlib uses AES-NI hardware instructions on x86 (all CPUs since 2010)
-  - Throughput: ~8-10 GB/s on modern hardware
-  - 1 GbE bottleneck: 125 MB/s -> encryption is never the bottleneck
-  - 10 GbE bottleneck: 1.25 GB/s -> still well below AES-NI throughput
-
-===================
-  4. OPTIONS
-===================
-  --buf=SIZE      Read-ahead buffer size. Default: 128m (128 MB).
-                  Buffers ZFS send output in a goroutine to smooth bursts.
-                  Recommended for 10G+ LAN: 128m or 256m.
-                  Disable with --buf=0 (original streaming behaviour).
-                  Units: k = KB, m = MB, g = GB
-                  Examples: --buf=256m   --buf=0
-
-  --rate=SPEED    Throughput limit in bytes/second. Default: off (unlimited).
-                  Useful for WAN/VPN replication on shared links.
-                  Recommended values:
-                    100 Mbit shared link: --rate=8m   (8 MB/s ~ 64 Mbit)
-                    1 Gbit shared link:   --rate=80m  (80 MB/s ~ 640 Mbit)
-                    2 Gbit shared link:   --rate=200m
-                  Not needed for dedicated 10G LAN links.
-                  Units: k = KB/s, m = MB/s, g = GB/s
-                  Examples: --rate=50m   --rate=100m
-
-  --progress      Show live transfer progress on stderr. Default: off.
-                  Output format (updated every second):
-                    1.23 GB | 45.2 MB/s | 00:27
-                  Does not interfere with data stream (stderr only).
-
-  --log=FILE      Append transfer summary to FILE after completion. Default: off.
-                  Summary includes: mode, bytes transferred, time, speed, options.
-                  Example: --log=/tmp/zstream.log
-                  Log line format:
-                    2026.06.26 14:30:00  zstream 1.1.0  mode=send  transferred=12.45 GB  time=02:45  speed=75.3 MB/s  buf=128 MB  rate=off
-
-===================
-  5. INSTALLATION (csweb-gui)
-===================
-  Binary location:
-    Linux / OmniOS / FreeBSD:  /opt/csweb-gui/_cfg/s3/bin/zstream
-    Windows:                   C:\opt\csweb-gui\_cfg\s3\bin\zstream.exe
-
-  After download:
-    Linux / OmniOS / FreeBSD:  chmod +x /opt/csweb-gui/_cfg/s3/bin/zstream
-    Windows:                   no chmod needed
-
-  Download via csweb-gui:
-    Pools > S3 Pool > S3 Local Server > Download zstream
-    (same mechanism as rclone/restic download)
-
-  Direct download from GitHub Releases:
-    https://github.com/guenther-alka/zstream/releases/latest/download/zstream-linux-amd64
-    https://github.com/guenther-alka/zstream/releases/latest/download/zstream-windows-amd64.exe
-    https://github.com/guenther-alka/zstream/releases/latest/download/zstream-freebsd-amd64
-    https://github.com/guenther-alka/zstream/releases/latest/download/zstream-solaris-amd64
-
-===================
-  5. BUILD FROM SOURCE
-===================
-  Requirements:
-    Go 1.21 or later
-    Download: https://go.dev/dl/
-    No external dependencies -- only Go standard library
-
-  Verify Go installation:
-    go version
-
-  Clone repository:
-    git clone https://github.com/guenther-alka/zstream.git
-    cd zstream
-
-  ===================
-  4a. BUILD ON LINUX (amd64)
-  ===================
-    go build -o zstream .
-    chmod +x zstream
-    ./zstream version
-
-  Build for all platforms from Linux:
-    GOOS=linux   GOARCH=amd64  go build -o zstream-linux-amd64  .
-    GOOS=linux   GOARCH=arm64  go build -o zstream-linux-arm64  .
-    GOOS=windows GOARCH=amd64  go build -o zstream-windows-amd64.exe .
-    GOOS=freebsd GOARCH=amd64  go build -o zstream-freebsd-amd64 .
-    GOOS=solaris GOARCH=amd64  go build -o zstream-solaris-amd64 .
-    GOOS=darwin  GOARCH=amd64  go build -o zstream-darwin-amd64 .
-    GOOS=darwin  GOARCH=arm64  go build -o zstream-darwin-arm64 .
-
-  CGO_ENABLED=0 is recommended for maximum portability (pure Go binary):
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o zstream .
-
-  Strip debug info for smaller binary (~30% smaller):
-    go build -ldflags="-s -w" -o zstream .
-
-  ===================
-  4b. BUILD ON WINDOWS (amd64)
-  ===================
-  Install Go from https://go.dev/dl/ (Windows installer, amd64)
-  Open PowerShell or cmd.exe:
-
-    cd zstream
-    go build -o zstream.exe .
-    .\zstream.exe version
-
-  Cross-compile for Linux from Windows:
-    $env:GOOS="linux"; $env:GOARCH="amd64"; $env:CGO_ENABLED="0"
-    go build -o zstream-linux-amd64 .
-
-  ===================
-  4c. BUILD ON OMNIOS / ILLUMOS (amd64)
-  ===================
-  Install Go:
-    pkg install runtime/go      (OmniOS CE r151xxx)
-    -- or --
-    Download from https://go.dev/dl/ (linux-amd64 binary works on OmniOS)
-
-  Note: OmniOS uses the Solaris syscall interface. Build with GOOS=solaris:
-    GOOS=solaris GOARCH=amd64 CGO_ENABLED=0 go build -o zstream .
-    chmod +x zstream
-    ./zstream version
-
-  If building on OmniOS for OmniOS, plain go build also works:
-    go build -o zstream .
-
-  ===================
-  4d. BUILD ON FREEBSD (amd64)
-  ===================
-  Install Go:
-    pkg install go              (FreeBSD pkg)
-    -- or --
-    Download from https://go.dev/dl/ (freebsd-amd64)
-
-    go build -o zstream .
-    chmod +x zstream
-    ./zstream version
-
-  ===================
-  4e. BUILD ON MACOS (amd64 / Apple Silicon)
-  ===================
-  Install Go from https://go.dev/dl/ or via Homebrew:
-    brew install go
-
-    go build -o zstream .
-    chmod +x zstream
-    ./zstream version
-
-  Cross-compile for Apple Silicon from Intel Mac (or vice versa):
-    GOARCH=arm64 go build -o zstream-arm64 .
-    GOARCH=amd64 go build -o zstream-amd64 .
-
-===================
-  6. AUTOMATED BUILD VIA GITHUB ACTIONS
-===================
-  The repository includes .github/workflows/release.yml which builds all
-  platform binaries automatically on every git tag push.
-
-  Workflow:
-    1. Create and push a version tag:
-         git tag v1.1.0
-         git push origin v1.1.0
-
-    2. GitHub Actions builds all platforms in parallel (~2 minutes)
-
-    4. A GitHub Release is created automatically with all binaries attached
-
-    5. Download URLs become available:
-         https://github.com/guenther-alka/zstream/releases/latest/download/FILENAME
-
-  Platforms built by GitHub Actions:
-    zstream-linux-amd64
-    zstream-linux-arm64
-    zstream-windows-amd64.exe
-    zstream-freebsd-amd64
-    zstream-solaris-amd64
-    zstream-darwin-amd64
-    zstream-darwin-arm64
-
-  No local Go installation needed for releases -- GitHub provides the build
-  environment. Only needed if you want to build and test locally first.
-
-===================
-  7. TESTING
-===================
-  Quick test (same machine, two terminals):
-
-  Terminal 1 (receiver):
-    zstream listen 9001 testkey123 > /tmp/received.bin
-
-  Terminal 2 (sender):
-    echo "hello zstream" | zstream send 127.0.0.1 9001 testkey123
-
-  Check result:
-    cat /tmp/received.bin
-    # should print: hello zstream
-
-  ZFS test (requires two members):
-    # On destination member:
-    zstream listen 9000 TESTKEY | zfs receive -F tank/backup
-
-    # On source member:
-    zfs send tank@testsnap | zstream send DEST_IP 9000 TESTKEY
-
-  Wrong key test (should fail with auth error):
-    Terminal 1: zstream listen 9001 correctkey > /tmp/out
-    Terminal 2: echo "data" | zstream send 127.0.0.1 9001 wrongkey
-    # Receiver exits with: decrypt/auth failed -- wrong key or corrupted data
-
-===================
-  8. INTEGRATION IN csweb-gui (job-replicate.pl)
-===================
-  Binary path:
-    $wpath/_cfg/s3/bin/zstream        (Linux/OmniOS/FreeBSD)
-    $wpath/_cfg/s3/bin/zstream.exe    (Windows)
-
-  job-replicate.pl checks for zstream at job start.
-  If not found: error with download hint (no nc fallback).
-
-  Session key generation (per transfer):
-    use Digest::SHA::PurePerl qw(sha256_hex);
-    my $session_key = sha256_hex(time() . $$ . $source_ip . $dest_ip . $snap);
-
-  Listener command (destination member):
-    "$zstream listen $port $session_key | zfs receive -F $dest_fs"
-
-  Sender command (source member):
-    "zfs send $snap | $zstream send $dest_ip $port $session_key"
-
-  Windows path:
-    $zstream = "$wpath/_cfg/s3/bin/zstream.exe"
-    Path uses forward slashes (Perl + server.pl handle conversion)
-
-  Port:
-    Same port as previously used for nc (configured in job .par file)
-    Default: 9000 (configurable per job)
-
-===================
-  9. WIRE PROTOCOL DETAILS
-===================
-  Connection: plain TCP (no TLS wrapper -- encryption is in the payload)
-
-  Handshake: none -- sender connects, immediately starts sending chunks.
-  Receiver accepts one connection then closes the listener socket.
-
-  Chunk format:
-    Offset  Size  Description
-    0       4     Chunk total length (BE uint32): nonce + ciphertext + tag
-    4       12    AES-GCM nonce (random, crypto/rand)
-    16      N     Ciphertext (plaintext encrypted with AES-256-GCM)
-    16+N    16    GCM authentication tag (appended by cipher.Seal)
-
-  End of stream:
-    4 zero bytes (length = 0)
-    Receiver exits cleanly after reading zero-length chunk.
-
-  Error handling:
-    Wrong key:         GCM Open() fails -> "auth failed" -> exit 1
-    Truncated stream:  ReadFull() fails -> "read chunk" error -> exit 1
-    Connection reset:  Read() returns EOF -> exit with partial data warning
-
-  No compression: ZFS send output is already compressed (LZ4/ZSTD/GZIP
-  depending on dataset compression setting). Adding compression in zstream
-  would give no benefit and add CPU overhead.
-
-===================
-  10. SECURITY NOTES
-===================
-  - AES-256-GCM provides both confidentiality and integrity
-  - Each chunk has a unique random nonce (no nonce reuse possible)
-  - GCM tag detects any modification, truncation or bit flip
-  - Session key is single-use (generated per transfer by job-replicate.pl)
-  - Key never stored on disk (passed as command-line argument, visible in ps)
-    This is acceptable because: server.pl executes commands as root, ps output
-    is only readable by root/admin on the member systems.
-  - No replay protection beyond session key uniqueness (time-based)
-  - Listener accepts only ONE connection then closes -- no multi-client risk
-  - Port must be open between members (same requirement as nc)
-    Recommendation: firewall to allow only member IPs on the replication port
-
-===================
-  11. KNOWN LIMITATIONS
-===================
-  - Solaris binary (GOOS=solaris) may not run on all Solaris variants.
-    OmniOS CE r151042+ tested. Older Solaris 11 may need native build.
-  - No resume on connection failure (same as nc)
-  - One transfer at a time per port (same as nc)
-  - Key visible in ps output (acceptable for root-only member systems)
-  - Rate limiter is sender-side only; receiver does not throttle
-================================================================================
+Encrypted TCP stream transport for ZFS replication. Replaces netcat (nc) in ZFS send/receive pipelines.
+
+Part of [napp-it csweb-gui](https://www.napp-it.org) â€” used by job-replicate for encrypted ZFS replication between members.
+
+## Usage
+
+```bash
+# Receiver (start first):
+zstream listen 9000 SESSIONKEY | zfs receive -F tank/backup
+
+# Sender:
+zfs send tank@snap | zstream send 192.168.1.10 9000 SESSIONKEY
+
+# With options (rate limit, progress, log):
+zfs send tank@snap | zstream send 192.168.1.10 9000 SESSIONKEY --rate=100m --progress --log=/tmp/zstream.log
+```
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--buf=SIZE` | `128m` | Read-ahead buffer (0 = off). Units: k/m/g |
+| `--rate=SPEED` | off | Throughput limit per second. Units: k/m/g |
+| `--progress` | off | Live progress on stderr |
+| `--log=FILE` | off | Append transfer summary to file |
+
+## Encryption
+
+- **AES-256-GCM** authenticated encryption (Go stdlib, AES-NI accelerated)
+- Session key per transfer (generated by job-replicate.pl)
+- Each 64KB chunk independently encrypted with random nonce
+- Authentication tag detects any tampering or corruption
+
+## Download
+
+Pre-built binaries for all platforms in [Releases](https://github.com/guenther-alka/zstream/releases/latest):
+
+| Platform | File |
+|----------|------|
+| Linux x86_64 | `zstream-linux-amd64` |
+| Linux ARM64 | `zstream-linux-arm64` |
+| Windows x86_64 | `zstream-windows-amd64.exe` |
+| FreeBSD x86_64 | `zstream-freebsd-amd64` |
+| OmniOS/Solaris x86_64 | `zstream-solaris-amd64` |
+
+## Build
+
+```bash
+git clone https://github.com/guenther-alka/zstream.git
+cd zstream
+go build -o zstream .
+
+# All platforms:
+GOOS=linux   GOARCH=amd64 go build -o zstream-linux-amd64 .
+GOOS=windows GOARCH=amd64 go build -o zstream-windows-amd64.exe .
+GOOS=freebsd GOARCH=amd64 go build -o zstream-freebsd-amd64 .
+GOOS=solaris GOARCH=amd64 go build -o zstream-solaris-amd64 .
+```
+
+Requires Go 1.21+. No external dependencies.
+
+## Install (csweb-gui)
+
+Place binary in `_cfg/s3/bin/zstream` (Linux/BSD/OmniOS) or `_cfg\s3\bin\zstream.exe` (Windows).
+
+See `zstream.info` for full documentation.
+
+## License
+
+BSD 2-Clause License â€” Copyright (c) 2026 Guenther Alka / napp-it.org
+
+Redistribution in source or binary form requires retaining the copyright notice.
+See [LICENSE](LICENSE) for full terms.
