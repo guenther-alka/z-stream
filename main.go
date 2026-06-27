@@ -291,6 +291,9 @@ func main() {
                         fmt.Fprintf(os.Stderr, "usage: zstream listen <port> <key> [options]\n")
                         os.Exit(1)
                 }
+                if len(pos[1]) < 8 {
+                        fatalf("key too short (min 8 chars) -- empty or weak key rejected")
+                }
                 doListen(pos[0], pos[1], opts)
         case "send":
                 pos, opts, err := parseFlags(os.Args[2:])
@@ -300,6 +303,9 @@ func main() {
                 if len(pos) != 3 {
                         fmt.Fprintf(os.Stderr, "usage: zstream send <host> <port> <key> [options]\n")
                         os.Exit(1)
+                }
+                if len(pos[2]) < 8 {
+                        fatalf("key too short (min 8 chars) -- empty or weak key rejected")
                 }
                 doSend(pos[0], pos[1], pos[2], opts)
         case "version", "--version", "-v":
