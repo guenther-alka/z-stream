@@ -39,6 +39,8 @@ Pre-built binaries for all platforms in [Releases](https://github.com/guenther-a
 
 | Platform | File |
 |----------|------|
+| macOS x86_64 | `zstream-darwin-amd64` |
+| macOS ARM64 | `zstream-darwin-arm64` |
 | Linux x86_64 | `zstream-linux-amd64` |
 | Linux ARM64 | `zstream-linux-arm64` |
 | Windows x86_64 | `zstream-windows-amd64.exe` |
@@ -54,6 +56,7 @@ cd zstream
 go build -o zstream .
 
 # All platforms:
+GOOS=darwin   GOARCH=amd64 go build -o zstream-darwin-amd64 .
 GOOS=linux   GOARCH=amd64 go build -o zstream-linux-amd64 .
 GOOS=windows GOARCH=amd64 go build -o zstream-windows-amd64.exe .
 GOOS=freebsd GOARCH=amd64 go build -o zstream-freebsd-amd64 .
