@@ -43,10 +43,13 @@ Pre-built binaries for all platforms in [Releases](https://github.com/guenther-a
 
 | Platform | File |
 |----------|------|
+| macOS x86_64 | `zstream-darwin-amd64` |
+| macOS ARM64 | `zstream-darwin-arm64` |
 | Linux x86_64 | `zstream-linux-amd64` |
 | Linux ARM64 | `zstream-linux-arm64` |
 | Windows x86_64 | `zstream-windows-amd64.exe` |
 | FreeBSD x86_64 | `zstream-freebsd-amd64` |
+| Illumos x86_64 | `zstream-illumos-amd64` |
 | OmniOS/Solaris x86_64 | `zstream-solaris-amd64` |
 
 ## Build
