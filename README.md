@@ -1,6 +1,6 @@
 # zstream
 
-Encrypted TCP stream transport for ZFS replication. Replaces netcat (nc) in ZFS send/receive pipelines.
+Encrypted TCP stream transport for ZFS replication. Replaces ssh, mbuffer, netcat (nc) and pv in ZFS send/receive pipelines.
 
 Part of [napp-it csweb-gui](https://www.napp-it.org) â€” used by job-replicate for encrypted ZFS replication between members.
 
