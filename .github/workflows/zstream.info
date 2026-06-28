@@ -1,7 +1,8 @@
 ================================================================================
   zstream -- Encrypted TCP Stream Transport for ZFS Replication
   Replaces netcat (nc) in job-replicate.pl
-  Repository: https://github.com/napp-it/zstream
+  Repository: https://github.com/guenther-alka/zstream
+  Version:    1.1.2
 ================================================================================
 
 ================================================================================
@@ -11,15 +12,24 @@
   ZFS send/receive replication pipelines. Unlike nc, zstream encrypts the
   stream using AES-256-GCM authenticated encryption.
 
+  Additional features (v1.1.0):
+  - Read-ahead buffer (default 128 MB) smooths ZFS send bursts
+  - Optional throughput rate limiting for shared links
+  - Live progress display (optional, --progress)
+  - Transfer summary on stderr + optional log file (--log=FILE)
+
   Usage is identical to nc from job-replicate.pl's perspective:
 
     nc equivalent (unencrypted):
       Receiver: nc -l -p 9000 | zfs receive -F tank/backup
       Sender:   zfs send tank@snap | nc 192.168.1.10 9000
 
-    zstream (encrypted):
+    zstream (encrypted, defaults):
       Receiver: zstream listen 9000 SESSIONKEY | zfs receive -F tank/backup
       Sender:   zfs send tank@snap | zstream send 192.168.1.10 9000 SESSIONKEY
+
+    zstream (rate-limited, with progress and log):
+      Sender:   zfs send tank@snap | zstream send 192.168.1.10 9000 SESSIONKEY --rate=100m --progress --log=/tmp/zstream.log
 
   The session key is generated per-transfer by job-replicate.pl:
     sha256_hex(time . $$ . $source_ip . $dest_ip . $snap)
@@ -49,7 +59,63 @@
   - 10 GbE bottleneck: 1.25 GB/s -> still well below AES-NI throughput
 
 ================================================================================
-  3. INSTALLATION (csweb-gui)
+  3. LICENSE
+================================================================================
+  BSD 2-Clause License
+
+  Copyright (c) 2026 Guenther Alka / napp-it.org
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+  1. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+
+  2. Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+
+  THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND. IN NO EVENT
+  SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY DAMAGES ARISING FROM THE USE
+  OF THIS SOFTWARE.
+
+================================================================================
+  4. OPTIONS
+================================================================================
+  --buf=SIZE      Read-ahead buffer size. Default: 128m (128 MB).
+                  Buffers ZFS send output in a goroutine to smooth bursts.
+                  Recommended for 10G+ LAN: 128m or 256m.
+                  Disable with --buf=0 (original streaming behaviour).
+                  Units: k = KB, m = MB, g = GB
+                  Examples: --buf=256m   --buf=0
+
+  --rate=SPEED    Throughput limit in bytes/second. Default: off (unlimited).
+                  Useful for WAN/VPN replication on shared links.
+                  Recommended values:
+                    100 Mbit shared link: --rate=8m   (8 MB/s ~ 64 Mbit)
+                    1 Gbit shared link:   --rate=80m  (80 MB/s ~ 640 Mbit)
+                    2 Gbit shared link:   --rate=200m
+                  Not needed for dedicated 10G LAN links.
+                  Units: k = KB/s, m = MB/s, g = GB/s
+                  Examples: --rate=50m   --rate=100m
+
+  --progress      Show live transfer progress on stderr. Default: off.
+                  Output format (updated every second):
+                    1.23 GB | 45.2 MB/s | 00:27
+                  Does not interfere with data stream (stderr only).
+
+  --bind=IP       Bind listener to specific IP address. Default: 0.0.0.0 (all interfaces).
+                  Use --bind=127.0.0.1 to restrict to localhost connections only.
+                  Example: --bind=192.168.1.10
+
+  --log=FILE      Append transfer summary to FILE after completion. Default: off.
+                  Summary includes: mode, bytes transferred, time, speed, options.
+                  Example: --log=/tmp/zstream.log
+                  Log line format:
+                    2026.06.26 14:30:00  zstream 1.1.2  mode=send  transferred=12.45 GB  time=02:45  speed=75.3 MB/s  buf=128 MB  rate=off
+
+================================================================================
+  5. INSTALLATION (csweb-gui)
 ================================================================================
   Binary location:
     Linux / OmniOS / FreeBSD:  /opt/csweb-gui/_cfg/s3/bin/zstream
@@ -64,13 +130,13 @@
     (same mechanism as rclone/restic download)
 
   Direct download from GitHub Releases:
-    https://github.com/napp-it/zstream/releases/latest/download/zstream-linux-amd64
-    https://github.com/napp-it/zstream/releases/latest/download/zstream-windows-amd64.exe
-    https://github.com/napp-it/zstream/releases/latest/download/zstream-freebsd-amd64
-    https://github.com/napp-it/zstream/releases/latest/download/zstream-solaris-amd64
+    https://github.com/guenther-alka/zstream/releases/latest/download/zstream-linux-amd64
+    https://github.com/guenther-alka/zstream/releases/latest/download/zstream-windows-amd64.exe
+    https://github.com/guenther-alka/zstream/releases/latest/download/zstream-freebsd-amd64
+    https://github.com/guenther-alka/zstream/releases/latest/download/zstream-solaris-amd64
 
 ================================================================================
-  4. BUILD FROM SOURCE
+  6. BUILD FROM SOURCE
 ================================================================================
   Requirements:
     Go 1.21 or later
@@ -81,7 +147,7 @@
     go version
 
   Clone repository:
-    git clone https://github.com/napp-it/zstream.git
+    git clone https://github.com/guenther-alka/zstream.git
     cd zstream
 
   ----------------------------------------------------------------------------
@@ -163,22 +229,22 @@
     GOARCH=amd64 go build -o zstream-amd64 .
 
 ================================================================================
-  5. AUTOMATED BUILD VIA GITHUB ACTIONS
+  7. AUTOMATED BUILD VIA GITHUB ACTIONS
 ================================================================================
   The repository includes .github/workflows/release.yml which builds all
   platform binaries automatically on every git tag push.
 
   Workflow:
     1. Create and push a version tag:
-         git tag v1.0.0
-         git push origin v1.0.0
+         git tag v1.1.0
+         git push origin v1.1.0
 
     2. GitHub Actions builds all platforms in parallel (~2 minutes)
 
-    3. A GitHub Release is created automatically with all binaries attached
+    6. A GitHub Release is created automatically with all binaries attached
 
-    4. Download URLs become available:
-         https://github.com/napp-it/zstream/releases/latest/download/FILENAME
+    7. Download URLs become available:
+         https://github.com/guenther-alka/zstream/releases/latest/download/FILENAME
 
   Platforms built by GitHub Actions:
     zstream-linux-amd64
@@ -193,7 +259,7 @@
   environment. Only needed if you want to build and test locally first.
 
 ================================================================================
-  6. TESTING
+  8. TESTING
 ================================================================================
   Quick test (same machine, two terminals):
 
@@ -220,7 +286,7 @@
     # Receiver exits with: decrypt/auth failed -- wrong key or corrupted data
 
 ================================================================================
-  7. INTEGRATION IN csweb-gui (job-replicate.pl)
+  9. INTEGRATION IN csweb-gui (job-replicate.pl)
 ================================================================================
   Binary path:
     $wpath/_cfg/s3/bin/zstream        (Linux/OmniOS/FreeBSD)
@@ -248,7 +314,7 @@
     Default: 9000 (configurable per job)
 
 ================================================================================
-  8. WIRE PROTOCOL DETAILS
+  10. WIRE PROTOCOL DETAILS
 ================================================================================
   Connection: plain TCP (no TLS wrapper -- encryption is in the payload)
 
@@ -276,7 +342,7 @@
   would give no benefit and add CPU overhead.
 
 ================================================================================
-  9. SECURITY NOTES
+  11. SECURITY NOTES
 ================================================================================
   - AES-256-GCM provides both confidentiality and integrity
   - Each chunk has a unique random nonce (no nonce reuse possible)
@@ -291,12 +357,15 @@
     Recommendation: firewall to allow only member IPs on the replication port
 
 ================================================================================
-  10. KNOWN LIMITATIONS
+  12. KNOWN LIMITATIONS
 ================================================================================
   - Solaris binary (GOOS=solaris) may not run on all Solaris variants.
     OmniOS CE r151042+ tested. Older Solaris 11 may need native build.
-  - No progress display (planned for future version)
   - No resume on connection failure (same as nc)
   - One transfer at a time per port (same as nc)
   - Key visible in ps output (acceptable for root-only member systems)
+  - Rate limiter is sender-side only; receiver does not throttle
+  - Accept timeout: 120s (listener gives up if no sender connects)
+  - Read timeout: 5 min per chunk (detects dead sender / network failure)
+  - Use --bind=IP to restrict listener to specific interface
 ================================================================================
