@@ -41,694 +41,694 @@
 package main
 
 import (
-        "crypto/aes"
-        "crypto/cipher"
-        "crypto/rand"
-        "crypto/sha256"
-        "encoding/binary"
-        "fmt"
-        "io"
-        "net"
-        "os"
-        "strconv"
-        "strings"
-        "sync/atomic"
-        "time"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"time"
 )
 
 const (
-        chunkSize      = 65536 // 64 KB plaintext per chunk
-        dialTimeout    = 30 * time.Second
-        acceptTimeout  = 120 * time.Second
-        readTimeout    = 5 * 60 * time.Second  // 5 min no-data timeout
-        version        = "1.1.2"
-        defaultBufSize = 128 * 1024 * 1024 // 128 MB
+	chunkSize      = 65536 // 64 KB plaintext per chunk
+	dialTimeout    = 30 * time.Second
+	acceptTimeout  = 120 * time.Second
+	readTimeout    = 5 * 60 * time.Second  // 5 min no-data timeout
+	version        = "1.1.2"
+	defaultBufSize = 128 * 1024 * 1024 // 128 MB
 )
 
 // options holds parsed CLI flags
 type options struct {
-        bufSize  int64  // 0 = disabled
-        rateHz   int64  // bytes/sec, 0 = unlimited
-        progress bool
-        logFile  string
-        bind     string // listen bind address, default 0.0.0.0
+	bufSize  int64  // 0 = disabled
+	rateHz   int64  // bytes/sec, 0 = unlimited
+	progress bool
+	logFile  string
+	bind     string // listen bind address, default 0.0.0.0
 }
 
 // parseSize parses "128m", "1g", "512k", or plain bytes
 func parseSize(s string) (int64, error) {
-        s = strings.ToLower(strings.TrimSpace(s))
-        if s == "0" || s == "off" || s == "no" {
-                return 0, nil
-        }
-        mul := int64(1)
-        if strings.HasSuffix(s, "g") {
-                mul = 1024 * 1024 * 1024
-                s = s[:len(s)-1]
-        } else if strings.HasSuffix(s, "m") {
-                mul = 1024 * 1024
-                s = s[:len(s)-1]
-        } else if strings.HasSuffix(s, "k") {
-                mul = 1024
-                s = s[:len(s)-1]
-        }
-        n, err := strconv.ParseInt(s, 10, 64)
-        if err != nil {
-                return 0, fmt.Errorf("invalid size: %q", s)
-        }
-        return n * mul, nil
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "0" || s == "off" || s == "no" {
+		return 0, nil
+	}
+	mul := int64(1)
+	if strings.HasSuffix(s, "g") {
+		mul = 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	} else if strings.HasSuffix(s, "m") {
+		mul = 1024 * 1024
+		s = s[:len(s)-1]
+	} else if strings.HasSuffix(s, "k") {
+		mul = 1024
+		s = s[:len(s)-1]
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size: %q", s)
+	}
+	return n * mul, nil
 }
 
 // parseFlags parses optional flags from args, returns remaining positional args
 func parseFlags(args []string) ([]string, options, error) {
-        opts := options{
-                bufSize: defaultBufSize,
-                bind:    "0.0.0.0",
-        }
-        var pos []string
-        for _, a := range args {
-                switch {
-                case strings.HasPrefix(a, "--buf="):
-                        v, err := parseSize(strings.TrimPrefix(a, "--buf="))
-                        if err != nil {
-                                return nil, opts, err
-                        }
-                        opts.bufSize = v
-                case strings.HasPrefix(a, "--rate="):
-                        v, err := parseSize(strings.TrimPrefix(a, "--rate="))
-                        if err != nil {
-                                return nil, opts, err
-                        }
-                        opts.rateHz = v
-                case a == "--progress":
-                        opts.progress = true
-                case strings.HasPrefix(a, "--log="):
-                        opts.logFile = strings.TrimPrefix(a, "--log=")
-                case strings.HasPrefix(a, "--bind="):
-                        opts.bind = strings.TrimPrefix(a, "--bind=")
-                default:
-                        pos = append(pos, a)
-                }
-        }
-        return pos, opts, nil
+	opts := options{
+		bufSize: defaultBufSize,
+		bind:    "0.0.0.0",
+	}
+	var pos []string
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "--buf="):
+			v, err := parseSize(strings.TrimPrefix(a, "--buf="))
+			if err != nil {
+				return nil, opts, err
+			}
+			opts.bufSize = v
+		case strings.HasPrefix(a, "--rate="):
+			v, err := parseSize(strings.TrimPrefix(a, "--rate="))
+			if err != nil {
+				return nil, opts, err
+			}
+			opts.rateHz = v
+		case a == "--progress":
+			opts.progress = true
+		case strings.HasPrefix(a, "--log="):
+			opts.logFile = strings.TrimPrefix(a, "--log=")
+		case strings.HasPrefix(a, "--bind="):
+			opts.bind = strings.TrimPrefix(a, "--bind=")
+		default:
+			pos = append(pos, a)
+		}
+	}
+	return pos, opts, nil
 }
 
 // fmtBytes formats bytes as human-readable string
 func fmtBytes(n int64) string {
-        switch {
-        case n >= 1024*1024*1024:
-                return fmt.Sprintf("%.2f GB", float64(n)/float64(1024*1024*1024))
-        case n >= 1024*1024:
-                return fmt.Sprintf("%.2f MB", float64(n)/float64(1024*1024))
-        case n >= 1024:
-                return fmt.Sprintf("%.2f KB", float64(n)/float64(1024))
-        default:
-                return fmt.Sprintf("%d B", n)
-        }
+	switch {
+	case n >= 1024*1024*1024:
+		return fmt.Sprintf("%.2f GB", float64(n)/float64(1024*1024*1024))
+	case n >= 1024*1024:
+		return fmt.Sprintf("%.2f MB", float64(n)/float64(1024*1024))
+	case n >= 1024:
+		return fmt.Sprintf("%.2f KB", float64(n)/float64(1024))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 // fmtDuration formats duration as mm:ss
 func fmtDuration(d time.Duration) string {
-        d = d.Round(time.Second)
-        m := int(d.Minutes())
-        s := int(d.Seconds()) % 60
-        return fmt.Sprintf("%02d:%02d", m, s)
+	d = d.Round(time.Second)
+	m := int(d.Minutes())
+	s := int(d.Seconds()) % 60
+	return fmt.Sprintf("%02d:%02d", m, s)
 }
 
 // rateLimiter is a simple token bucket: refills every 10ms
 type rateLimiter struct {
-        rate    int64 // bytes/sec
-        tokens  int64 // current available bytes
-        lastRef time.Time
+	rate    int64 // bytes/sec
+	tokens  int64 // current available bytes
+	lastRef time.Time
 }
 
 func newRateLimiter(bytesPerSec int64) *rateLimiter {
-        return &rateLimiter{rate: bytesPerSec, tokens: bytesPerSec / 100, lastRef: time.Now()}
+	return &rateLimiter{rate: bytesPerSec, tokens: bytesPerSec / 100, lastRef: time.Now()}
 }
 
 func (rl *rateLimiter) wait(n int64) {
-        for {
-                now := time.Now()
-                elapsed := now.Sub(rl.lastRef)
-                rl.lastRef = now
-                add := int64(float64(rl.rate) * elapsed.Seconds())
-                rl.tokens += add
-                max := rl.rate / 5 // cap tokens at 200ms worth
-                if max < int64(chunkSize) {
-                        max = int64(chunkSize)
-                }
-                if rl.tokens > max {
-                        rl.tokens = max
-                }
-                if rl.tokens >= n {
-                        rl.tokens -= n
-                        return
-                }
-                // Sleep proportional to deficit
-                deficit := n - rl.tokens
-                sleep := time.Duration(float64(deficit) / float64(rl.rate) * float64(time.Second))
-                if sleep < time.Millisecond {
-                        sleep = time.Millisecond
-                }
-                time.Sleep(sleep)
-        }
+	for {
+		now := time.Now()
+		elapsed := now.Sub(rl.lastRef)
+		rl.lastRef = now
+		add := int64(float64(rl.rate) * elapsed.Seconds())
+		rl.tokens += add
+		max := rl.rate / 5 // cap tokens at 200ms worth
+		if max < int64(chunkSize) {
+			max = int64(chunkSize)
+		}
+		if rl.tokens > max {
+			rl.tokens = max
+		}
+		if rl.tokens >= n {
+			rl.tokens -= n
+			return
+		}
+		// Sleep proportional to deficit
+		deficit := n - rl.tokens
+		sleep := time.Duration(float64(deficit) / float64(rl.rate) * float64(time.Second))
+		if sleep < time.Millisecond {
+			sleep = time.Millisecond
+		}
+		time.Sleep(sleep)
+	}
 }
 
 // progressReporter prints live stats to stderr every second
 type progressReporter struct {
-        counter *int64
-        stop    chan struct{}
-        done    chan struct{}
+	counter *int64
+	stop    chan struct{}
+	done    chan struct{}
 }
 
 func startProgress(counter *int64) *progressReporter {
-        pr := &progressReporter{
-                counter: counter,
-                stop:    make(chan struct{}),
-                done:    make(chan struct{}),
-        }
-        go pr.run()
-        return pr
+	pr := &progressReporter{
+		counter: counter,
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	go pr.run()
+	return pr
 }
 
 func (pr *progressReporter) run() {
-        defer close(pr.done)
-        start := time.Now()
-        var lastBytes int64
-        ticker := time.NewTicker(time.Second)
-        defer ticker.Stop()
-        for {
-                select {
-                case <-pr.stop:
-                        fmt.Fprintf(os.Stderr, "\r\033[K") // clear line
-                        return
-                case <-ticker.C:
-                        cur := atomic.LoadInt64(pr.counter)
-                        elapsed := time.Since(start)
-                        speed := float64(cur-lastBytes) // bytes in last second
-                        lastBytes = cur
-                        fmt.Fprintf(os.Stderr, "\r  %s | %s/s | %s   ",
-                                fmtBytes(cur), fmtBytes(int64(speed)), fmtDuration(elapsed))
-                }
-        }
+	defer close(pr.done)
+	start := time.Now()
+	var lastBytes int64
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-pr.stop:
+			fmt.Fprintf(os.Stderr, "\r\033[K") // clear line
+			return
+		case <-ticker.C:
+			cur := atomic.LoadInt64(pr.counter)
+			elapsed := time.Since(start)
+			speed := float64(cur-lastBytes) // bytes in last second
+			lastBytes = cur
+			fmt.Fprintf(os.Stderr, "\r  %s | %s/s | %s   ",
+				fmtBytes(cur), fmtBytes(int64(speed)), fmtDuration(elapsed))
+		}
+	}
 }
 
 func (pr *progressReporter) Stop() {
-        close(pr.stop)
-        <-pr.done
+	close(pr.stop)
+	<-pr.done
 }
 
 // writeStats writes the transfer summary to stderr and optionally a log file
 func writeStats(logFile string, mode string, total int64, elapsed time.Duration, opts options) {
-        speed := int64(0)
-        if elapsed.Seconds() > 0 {
-                speed = int64(float64(total) / elapsed.Seconds())
-        }
+	speed := int64(0)
+	if elapsed.Seconds() > 0 {
+		speed = int64(float64(total) / elapsed.Seconds())
+	}
 
-        bufInfo := fmtBytes(opts.bufSize)
-        if opts.bufSize == 0 {
-                bufInfo = "off"
-        }
-        rateInfo := "off"
-        if opts.rateHz > 0 {
-                rateInfo = fmtBytes(opts.rateHz) + "/s"
-        }
+	bufInfo := fmtBytes(opts.bufSize)
+	if opts.bufSize == 0 {
+		bufInfo = "off"
+	}
+	rateInfo := "off"
+	if opts.rateHz > 0 {
+		rateInfo = fmtBytes(opts.rateHz) + "/s"
+	}
 
-        lines := []string{
-                fmt.Sprintf("zstream %s  mode=%-6s  transferred=%s  time=%s  speed=%s/s  buf=%s  rate=%s",
-                        version, mode,
-                        fmtBytes(total),
-                        fmtDuration(elapsed),
-                        fmtBytes(speed),
-                        bufInfo,
-                        rateInfo,
-                ),
-        }
+	lines := []string{
+		fmt.Sprintf("zstream %s  mode=%-6s  transferred=%s  time=%s  speed=%s/s  buf=%s  rate=%s",
+			version, mode,
+			fmtBytes(total),
+			fmtDuration(elapsed),
+			fmtBytes(speed),
+			bufInfo,
+			rateInfo,
+		),
+	}
 
-        for _, l := range lines {
-                logf("%s", l)
-        }
+	for _, l := range lines {
+		logf("%s", l)
+	}
 
-        if logFile != "" {
-                f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-                if err != nil {
-                        logf("WARNING: cannot write log %s: %v", logFile, err)
-                        return
-                }
-                defer f.Close()
-                ts := time.Now().Format("2006.01.02 15:04:05")
-                for _, l := range lines {
-                        fmt.Fprintf(f, "%s  %s\n", ts, l)
-                }
-        }
+	if logFile != "" {
+		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			logf("WARNING: cannot write log %s: %v", logFile, err)
+			return
+		}
+		defer f.Close()
+		ts := time.Now().Format("2006.01.02 15:04:05")
+		for _, l := range lines {
+			fmt.Fprintf(f, "%s  %s\n", ts, l)
+		}
+	}
 }
 
 func main() {
-        if len(os.Args) < 2 {
-                usage()
-                os.Exit(1)
-        }
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(1)
+	}
 
-        cmd := strings.ToLower(os.Args[1])
-        switch cmd {
-        case "listen":
-                pos, opts, err := parseFlags(os.Args[2:])
-                if err != nil {
-                        fatalf("%v", err)
-                }
-                if len(pos) != 2 {
-                        fmt.Fprintf(os.Stderr, "usage: zstream listen <port> <key> [options]\n")
-                        os.Exit(1)
-                }
-                if len(pos[1]) < 8 {
-                        fatalf("key too short (min 8 chars) -- empty or weak key rejected")
-                }
-                doListen(pos[0], pos[1], opts)
-        case "send":
-                pos, opts, err := parseFlags(os.Args[2:])
-                if err != nil {
-                        fatalf("%v", err)
-                }
-                if len(pos) != 3 {
-                        fmt.Fprintf(os.Stderr, "usage: zstream send <host> <port> <key> [options]\n")
-                        os.Exit(1)
-                }
-                if len(pos[2]) < 8 {
-                        fatalf("key too short (min 8 chars) -- empty or weak key rejected")
-                }
-                doSend(pos[0], pos[1], pos[2], opts)
-        case "version", "--version", "-v":
-                fmt.Printf("zstream %s\n", version)
-        default:
-                usage()
-                os.Exit(1)
-        }
+	cmd := strings.ToLower(os.Args[1])
+	switch cmd {
+	case "listen":
+		pos, opts, err := parseFlags(os.Args[2:])
+		if err != nil {
+			fatalf("%v", err)
+		}
+		if len(pos) != 2 {
+			fmt.Fprintf(os.Stderr, "usage: zstream listen <port> <key> [options]\n")
+			os.Exit(1)
+		}
+		if len(pos[1]) < 8 {
+			fatalf("key too short (min 8 chars) -- empty or weak key rejected")
+		}
+		doListen(pos[0], pos[1], opts)
+	case "send":
+		pos, opts, err := parseFlags(os.Args[2:])
+		if err != nil {
+			fatalf("%v", err)
+		}
+		if len(pos) != 3 {
+			fmt.Fprintf(os.Stderr, "usage: zstream send <host> <port> <key> [options]\n")
+			os.Exit(1)
+		}
+		if len(pos[2]) < 8 {
+			fatalf("key too short (min 8 chars) -- empty or weak key rejected")
+		}
+		doSend(pos[0], pos[1], pos[2], opts)
+	case "version", "--version", "-v":
+		fmt.Printf("zstream %s\n", version)
+	default:
+		usage()
+		os.Exit(1)
+	}
 }
 
 func usage() {
-        fmt.Fprintf(os.Stderr, "zstream %s -- encrypted TCP stream transport for ZFS replication\n\n", version)
-        fmt.Fprintf(os.Stderr, "Usage:\n")
-        fmt.Fprintf(os.Stderr, "  zstream listen <port> <key> [options]          listen and decrypt to stdout\n")
-        fmt.Fprintf(os.Stderr, "  zstream send   <host> <port> <key> [options]   encrypt stdin and send\n")
-        fmt.Fprintf(os.Stderr, "  zstream version                                print version\n\n")
-        fmt.Fprintf(os.Stderr, "Options:\n")
-        fmt.Fprintf(os.Stderr, "  --buf=SIZE      read-ahead buffer (default 128m, 0=off)  e.g. --buf=256m\n")
-        fmt.Fprintf(os.Stderr, "  --rate=SPEED    throughput limit (default off)           e.g. --rate=50m\n")
-        fmt.Fprintf(os.Stderr, "  --progress      show live progress on stderr\n")
-        fmt.Fprintf(os.Stderr, "  --log=FILE      append transfer summary to FILE\n")
-        fmt.Fprintf(os.Stderr, "  --bind=IP       bind listener to IP (default 0.0.0.0)\n\n")
-        fmt.Fprintf(os.Stderr, "Example:\n")
-        fmt.Fprintf(os.Stderr, "  # Receiver:\n")
-        fmt.Fprintf(os.Stderr, "  zstream listen 9000 MYKEY | zfs receive -F tank/backup\n\n")
-        fmt.Fprintf(os.Stderr, "  # Sender (rate-limited, with log):\n")
-        fmt.Fprintf(os.Stderr, "  zfs send tank@snap | zstream send 192.168.1.10 9000 MYKEY --rate=100m --log=/tmp/zstream.log\n")
+	fmt.Fprintf(os.Stderr, "zstream %s -- encrypted TCP stream transport for ZFS replication\n\n", version)
+	fmt.Fprintf(os.Stderr, "Usage:\n")
+	fmt.Fprintf(os.Stderr, "  zstream listen <port> <key> [options]          listen and decrypt to stdout\n")
+	fmt.Fprintf(os.Stderr, "  zstream send   <host> <port> <key> [options]   encrypt stdin and send\n")
+	fmt.Fprintf(os.Stderr, "  zstream version                                print version\n\n")
+	fmt.Fprintf(os.Stderr, "Options:\n")
+	fmt.Fprintf(os.Stderr, "  --buf=SIZE      read-ahead buffer (default 128m, 0=off)  e.g. --buf=256m\n")
+	fmt.Fprintf(os.Stderr, "  --rate=SPEED    throughput limit (default off)           e.g. --rate=50m\n")
+	fmt.Fprintf(os.Stderr, "  --progress      show live progress on stderr\n")
+	fmt.Fprintf(os.Stderr, "  --log=FILE      append transfer summary to FILE\n")
+	fmt.Fprintf(os.Stderr, "  --bind=IP       bind listener to IP (default 0.0.0.0)\n\n")
+	fmt.Fprintf(os.Stderr, "Example:\n")
+	fmt.Fprintf(os.Stderr, "  # Receiver:\n")
+	fmt.Fprintf(os.Stderr, "  zstream listen 9000 MYKEY | zfs receive -F tank/backup\n\n")
+	fmt.Fprintf(os.Stderr, "  # Sender (rate-limited, with log):\n")
+	fmt.Fprintf(os.Stderr, "  zfs send tank@snap | zstream send 192.168.1.10 9000 MYKEY --rate=100m --log=/tmp/zstream.log\n")
 }
 
 // deriveKey derives a 32-byte AES key from an arbitrary string via SHA-256.
 func deriveKey(keystr string) []byte {
-        h := sha256.Sum256([]byte(keystr))
-        return h[:]
+	h := sha256.Sum256([]byte(keystr))
+	return h[:]
 }
 
 // newGCM creates an AES-256-GCM cipher from a key string.
 func newGCM(keystr string) (cipher.AEAD, error) {
-        key := deriveKey(keystr)
-        block, err := aes.NewCipher(key)
-        if err != nil {
-                return nil, err
-        }
-        return cipher.NewGCM(block)
+	key := deriveKey(keystr)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
 }
 
 // doListen opens a TCP listener, accepts one connection, decrypts the stream
 // and writes plaintext to stdout.
 func doListen(port, keystr string, opts options) {
-        listenAddr := opts.bind + ":" + port
-        ln, err := net.Listen("tcp", listenAddr)
-        if err != nil {
-                fatalf("listen %s: %v", listenAddr, err)
-        }
-        defer ln.Close()
+	listenAddr := opts.bind + ":" + port
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		fatalf("listen %s: %v", listenAddr, err)
+	}
+	defer ln.Close()
 
-        logf("listening on %s  (buf=%s)", listenAddr, func() string {
-                if opts.bufSize == 0 {
-                        return "off"
-                }
-                return fmtBytes(opts.bufSize)
-        }())
+	logf("listening on %s  (buf=%s)", listenAddr, func() string {
+		if opts.bufSize == 0 {
+			return "off"
+		}
+		return fmtBytes(opts.bufSize)
+	}())
 
-        // Accept timeout: don't wait forever for a sender
-        ln.(*net.TCPListener).SetDeadline(time.Now().Add(acceptTimeout))
-        conn, err := ln.Accept()
-        if err != nil {
-                fatalf("accept (timeout %s): %v", acceptTimeout, err)
-        }
-        defer conn.Close()
-        ln.Close()
+	// Accept timeout: don't wait forever for a sender
+	ln.(*net.TCPListener).SetDeadline(time.Now().Add(acceptTimeout))
+	conn, err := ln.Accept()
+	if err != nil {
+		fatalf("accept (timeout %s): %v", acceptTimeout, err)
+	}
+	defer conn.Close()
+	ln.Close()
 
-        logf("connection from %s", conn.RemoteAddr())
+	logf("connection from %s", conn.RemoteAddr())
 
-        // Read timeout: detect dead sender / network failure
-        conn.SetReadDeadline(time.Now().Add(readTimeout))
+	// Read timeout: detect dead sender / network failure
+	conn.SetReadDeadline(time.Now().Add(readTimeout))
 
-        gcm, err := newGCM(keystr)
-        if err != nil {
-                fatalf("cipher init: %v", err)
-        }
+	gcm, err := newGCM(keystr)
+	if err != nil {
+		fatalf("cipher init: %v", err)
+	}
 
-        start := time.Now()
-        var counter int64
+	start := time.Now()
+	var counter int64
 
-        var pr *progressReporter
-        if opts.progress {
-                pr = startProgress(&counter)
-        }
+	var pr *progressReporter
+	if opts.progress {
+		pr = startProgress(&counter)
+	}
 
-        var rl *rateLimiter
-        if opts.rateHz > 0 {
-                rl = newRateLimiter(opts.rateHz)
-        }
+	var rl *rateLimiter
+	if opts.rateHz > 0 {
+		rl = newRateLimiter(opts.rateHz)
+	}
 
-        var total int64
-        if opts.bufSize > 0 {
-                total, err = decryptStreamBuffered(conn, os.Stdout, gcm, opts.bufSize, &counter, rl)
-        } else {
-                total, err = decryptStream(conn, os.Stdout, gcm, &counter, rl)
-        }
+	var total int64
+	if opts.bufSize > 0 {
+		total, err = decryptStreamBuffered(conn, os.Stdout, gcm, opts.bufSize, &counter, rl)
+	} else {
+		total, err = decryptStream(conn, os.Stdout, gcm, &counter, rl)
+	}
 
-        if pr != nil {
-                pr.Stop()
-        }
+	if pr != nil {
+		pr.Stop()
+	}
 
-        if err != nil {
-                fatalf("decrypt: %v", err)
-        }
+	if err != nil {
+		fatalf("decrypt: %v", err)
+	}
 
-        elapsed := time.Since(start)
-        writeStats(opts.logFile, "listen", total, elapsed, opts)
+	elapsed := time.Since(start)
+	writeStats(opts.logFile, "listen", total, elapsed, opts)
 }
 
 // doSend connects to host:port, encrypts stdin and sends the encrypted stream.
 func doSend(host, port, keystr string, opts options) {
-        addr := net.JoinHostPort(host, port)
+	addr := net.JoinHostPort(host, port)
 
-        var conn net.Conn
-        var err error
-        deadline := time.Now().Add(dialTimeout)
-        for {
-                conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
-                if err == nil {
-                        break
-                }
-                if time.Now().After(deadline) {
-                        fatalf("connect %s: %v", addr, err)
-                }
-                logf("connect %s failed, retrying... (%v)", addr, err)
-                time.Sleep(2 * time.Second)
-        }
-        defer conn.Close()
+	var conn net.Conn
+	var err error
+	deadline := time.Now().Add(dialTimeout)
+	for {
+		conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			fatalf("connect %s: %v", addr, err)
+		}
+		logf("connect %s failed, retrying... (%v)", addr, err)
+		time.Sleep(2 * time.Second)
+	}
+	defer conn.Close()
 
-        logf("connected to %s  (buf=%s)", addr, func() string {
-                if opts.bufSize == 0 {
-                        return "off"
-                }
-                return fmtBytes(opts.bufSize)
-        }())
+	logf("connected to %s  (buf=%s)", addr, func() string {
+		if opts.bufSize == 0 {
+			return "off"
+		}
+		return fmtBytes(opts.bufSize)
+	}())
 
-        gcm, err := newGCM(keystr)
-        if err != nil {
-                fatalf("cipher init: %v", err)
-        }
+	gcm, err := newGCM(keystr)
+	if err != nil {
+		fatalf("cipher init: %v", err)
+	}
 
-        start := time.Now()
-        var counter int64
+	start := time.Now()
+	var counter int64
 
-        var pr *progressReporter
-        if opts.progress {
-                pr = startProgress(&counter)
-        }
+	var pr *progressReporter
+	if opts.progress {
+		pr = startProgress(&counter)
+	}
 
-        var rl *rateLimiter
-        if opts.rateHz > 0 {
-                rl = newRateLimiter(opts.rateHz)
-        }
+	var rl *rateLimiter
+	if opts.rateHz > 0 {
+		rl = newRateLimiter(opts.rateHz)
+	}
 
-        var total int64
-        if opts.bufSize > 0 {
-                total, err = encryptStreamBuffered(os.Stdin, conn, gcm, opts.bufSize, &counter, rl)
-        } else {
-                total, err = encryptStream(os.Stdin, conn, gcm, &counter, rl)
-        }
+	var total int64
+	if opts.bufSize > 0 {
+		total, err = encryptStreamBuffered(os.Stdin, conn, gcm, opts.bufSize, &counter, rl)
+	} else {
+		total, err = encryptStream(os.Stdin, conn, gcm, &counter, rl)
+	}
 
-        if pr != nil {
-                pr.Stop()
-        }
+	if pr != nil {
+		pr.Stop()
+	}
 
-        if err != nil {
-                fatalf("encrypt: %v", err)
-        }
+	if err != nil {
+		fatalf("encrypt: %v", err)
+	}
 
-        elapsed := time.Since(start)
-        writeStats(opts.logFile, "send", total, elapsed, opts)
+	elapsed := time.Since(start)
+	writeStats(opts.logFile, "send", total, elapsed, opts)
 }
 
 // -- Buffered variants (producer goroutine + channel) --
 
 type chunk struct {
-        data []byte
-        err  error
+	data []byte
+	err  error
 }
 
 // encryptStreamBuffered reads stdin in a goroutine into a channel of chunks,
 // main goroutine encrypts and sends. Buffer = channel capacity * chunkSize.
 func encryptStreamBuffered(r io.Reader, w io.Writer, gcm cipher.AEAD, bufSize int64, counter *int64, rl *rateLimiter) (int64, error) {
-        cap_ := int(bufSize / chunkSize)
-        if cap_ < 2 {
-                cap_ = 2
-        }
-        ch := make(chan chunk, cap_)
+	cap_ := int(bufSize / chunkSize)
+	if cap_ < 2 {
+		cap_ = 2
+	}
+	ch := make(chan chunk, cap_)
 
-        // Producer: read stdin into channel
-        go func() {
-                for {
-                        buf := make([]byte, chunkSize)
-                        n, readErr := io.ReadFull(r, buf)
-                        if n > 0 {
-                                b := make([]byte, n)
-                                copy(b, buf[:n])
-                                ch <- chunk{data: b}
-                        }
-                        if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
-                                ch <- chunk{err: io.EOF}
-                                return
-                        }
-                        if readErr != nil {
-                                ch <- chunk{err: readErr}
-                                return
-                        }
-                }
-        }()
+	// Producer: read stdin into channel
+	go func() {
+		for {
+			buf := make([]byte, chunkSize)
+			n, readErr := io.ReadFull(r, buf)
+			if n > 0 {
+				b := make([]byte, n)
+				copy(b, buf[:n])
+				ch <- chunk{data: b}
+			}
+			if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+				ch <- chunk{err: io.EOF}
+				return
+			}
+			if readErr != nil {
+				ch <- chunk{err: readErr}
+				return
+			}
+		}
+	}()
 
-        var total int64
-        for c := range ch {
-                if c.err == io.EOF {
-                        break
-                }
-                if c.err != nil {
-                        return total, fmt.Errorf("read: %w", c.err)
-                }
+	var total int64
+	for c := range ch {
+		if c.err == io.EOF {
+			break
+		}
+		if c.err != nil {
+			return total, fmt.Errorf("read: %w", c.err)
+		}
 
-                if rl != nil {
-                        rl.wait(int64(len(c.data)))
-                }
+		if rl != nil {
+			rl.wait(int64(len(c.data)))
+		}
 
-                nonce := make([]byte, gcm.NonceSize())
-                if _, err := rand.Read(nonce); err != nil {
-                        return total, fmt.Errorf("nonce: %w", err)
-                }
-                ciphertext := gcm.Seal(nonce, nonce, c.data, nil)
+		nonce := make([]byte, gcm.NonceSize())
+		if _, err := rand.Read(nonce); err != nil {
+			return total, fmt.Errorf("nonce: %w", err)
+		}
+		ciphertext := gcm.Seal(nonce, nonce, c.data, nil)
 
-                var lenBuf [4]byte
-                binary.BigEndian.PutUint32(lenBuf[:], uint32(len(ciphertext)))
-                if _, err := w.Write(lenBuf[:]); err != nil {
-                        return total, fmt.Errorf("write len: %w", err)
-                }
-                if _, err := w.Write(ciphertext); err != nil {
-                        return total, fmt.Errorf("write chunk: %w", err)
-                }
+		var lenBuf [4]byte
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(ciphertext)))
+		if _, err := w.Write(lenBuf[:]); err != nil {
+			return total, fmt.Errorf("write len: %w", err)
+		}
+		if _, err := w.Write(ciphertext); err != nil {
+			return total, fmt.Errorf("write chunk: %w", err)
+		}
 
-                total += int64(len(c.data))
-                atomic.StoreInt64(counter, total)
-        }
+		total += int64(len(c.data))
+		atomic.StoreInt64(counter, total)
+	}
 
-        if _, err := w.Write([]byte{0, 0, 0, 0}); err != nil {
-                return total, fmt.Errorf("write eos: %w", err)
-        }
-        return total, nil
+	if _, err := w.Write([]byte{0, 0, 0, 0}); err != nil {
+		return total, fmt.Errorf("write eos: %w", err)
+	}
+	return total, nil
 }
 
 // decryptStreamBuffered decrypts from r, buffers plaintext chunks, writes to w.
 func decryptStreamBuffered(r io.Reader, w io.Writer, gcm cipher.AEAD, bufSize int64, counter *int64, rl *rateLimiter) (int64, error) {
-        cap_ := int(bufSize / chunkSize)
-        if cap_ < 2 {
-                cap_ = 2
-        }
-        ch := make(chan chunk, cap_)
-        nonceSize := gcm.NonceSize()
+	cap_ := int(bufSize / chunkSize)
+	if cap_ < 2 {
+		cap_ = 2
+	}
+	ch := make(chan chunk, cap_)
+	nonceSize := gcm.NonceSize()
 
-        // Producer: decrypt chunks into channel
-        go func() {
-                for {
-                        // Refresh read deadline on each chunk
-                        if tc, ok := r.(interface{ SetReadDeadline(time.Time) error }); ok {
-                                tc.SetReadDeadline(time.Now().Add(readTimeout))
-                        }
-                        var lenBuf [4]byte
-                        if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
-                                if err == io.EOF {
-                                        ch <- chunk{err: io.EOF}
-                                } else {
-                                        ch <- chunk{err: fmt.Errorf("read len: %w", err)}
-                                }
-                                return
-                        }
-                        chunkLen := binary.BigEndian.Uint32(lenBuf[:])
-                        if chunkLen == 0 {
-                                ch <- chunk{err: io.EOF}
-                                return
-                        }
-                        maxChunk := uint32(nonceSize + chunkSize + 16)
-                        if chunkLen > maxChunk {
-                                ch <- chunk{err: fmt.Errorf("chunk too large: %d -- wrong key?", chunkLen)}
-                                return
-                        }
-                        buf := make([]byte, chunkLen)
-                        if _, err := io.ReadFull(r, buf); err != nil {
-                                ch <- chunk{err: fmt.Errorf("read chunk: %w", err)}
-                                return
-                        }
-                        plaintext, err := gcm.Open(nil, buf[:nonceSize], buf[nonceSize:], nil)
-                        if err != nil {
-                                ch <- chunk{err: fmt.Errorf("decrypt/auth failed -- wrong key or corrupted data: %w", err)}
-                                return
-                        }
-                        ch <- chunk{data: plaintext}
-                }
-        }()
+	// Producer: decrypt chunks into channel
+	go func() {
+		for {
+			// Refresh read deadline on each chunk
+			if tc, ok := r.(interface{ SetReadDeadline(time.Time) error }); ok {
+				tc.SetReadDeadline(time.Now().Add(readTimeout))
+			}
+			var lenBuf [4]byte
+			if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+				if err == io.EOF {
+					ch <- chunk{err: io.EOF}
+				} else {
+					ch <- chunk{err: fmt.Errorf("read len: %w", err)}
+				}
+				return
+			}
+			chunkLen := binary.BigEndian.Uint32(lenBuf[:])
+			if chunkLen == 0 {
+				ch <- chunk{err: io.EOF}
+				return
+			}
+			maxChunk := uint32(nonceSize + chunkSize + 16)
+			if chunkLen > maxChunk {
+				ch <- chunk{err: fmt.Errorf("chunk too large: %d -- wrong key?", chunkLen)}
+				return
+			}
+			buf := make([]byte, chunkLen)
+			if _, err := io.ReadFull(r, buf); err != nil {
+				ch <- chunk{err: fmt.Errorf("read chunk: %w", err)}
+				return
+			}
+			plaintext, err := gcm.Open(nil, buf[:nonceSize], buf[nonceSize:], nil)
+			if err != nil {
+				ch <- chunk{err: fmt.Errorf("decrypt/auth failed -- wrong key or corrupted data: %w", err)}
+				return
+			}
+			ch <- chunk{data: plaintext}
+		}
+	}()
 
-        var total int64
-        for c := range ch {
-                if c.err == io.EOF {
-                        break
-                }
-                if c.err != nil {
-                        return total, c.err
-                }
-                if rl != nil {
-                        rl.wait(int64(len(c.data)))
-                }
-                if _, err := w.Write(c.data); err != nil {
-                        return total, fmt.Errorf("write plaintext: %w", err)
-                }
-                total += int64(len(c.data))
-                atomic.StoreInt64(counter, total)
-        }
-        return total, nil
+	var total int64
+	for c := range ch {
+		if c.err == io.EOF {
+			break
+		}
+		if c.err != nil {
+			return total, c.err
+		}
+		if rl != nil {
+			rl.wait(int64(len(c.data)))
+		}
+		if _, err := w.Write(c.data); err != nil {
+			return total, fmt.Errorf("write plaintext: %w", err)
+		}
+		total += int64(len(c.data))
+		atomic.StoreInt64(counter, total)
+	}
+	return total, nil
 }
 
 // -- Unbuffered variants (original, used when --buf=0) --
 
 func encryptStream(r io.Reader, w io.Writer, gcm cipher.AEAD, counter *int64, rl *rateLimiter) (int64, error) {
-        buf := make([]byte, chunkSize)
-        var total int64
-        for {
-                n, readErr := io.ReadFull(r, buf)
-                if n == 0 && readErr == io.EOF {
-                        break
-                }
-                if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
-                        return total, fmt.Errorf("read: %w", readErr)
-                }
-                if n == 0 {
-                        break
-                }
-                if rl != nil {
-                        rl.wait(int64(n))
-                }
-                nonce := make([]byte, gcm.NonceSize())
-                if _, err := rand.Read(nonce); err != nil {
-                        return total, fmt.Errorf("nonce: %w", err)
-                }
-                ciphertext := gcm.Seal(nonce, nonce, buf[:n], nil)
-                var lenBuf [4]byte
-                binary.BigEndian.PutUint32(lenBuf[:], uint32(len(ciphertext)))
-                if _, err := w.Write(lenBuf[:]); err != nil {
-                        return total, fmt.Errorf("write len: %w", err)
-                }
-                if _, err := w.Write(ciphertext); err != nil {
-                        return total, fmt.Errorf("write chunk: %w", err)
-                }
-                total += int64(n)
-                atomic.StoreInt64(counter, total)
-                if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
-                        break
-                }
-        }
-        if _, err := w.Write([]byte{0, 0, 0, 0}); err != nil {
-                return total, fmt.Errorf("write eos: %w", err)
-        }
-        return total, nil
+	buf := make([]byte, chunkSize)
+	var total int64
+	for {
+		n, readErr := io.ReadFull(r, buf)
+		if n == 0 && readErr == io.EOF {
+			break
+		}
+		if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
+			return total, fmt.Errorf("read: %w", readErr)
+		}
+		if n == 0 {
+			break
+		}
+		if rl != nil {
+			rl.wait(int64(n))
+		}
+		nonce := make([]byte, gcm.NonceSize())
+		if _, err := rand.Read(nonce); err != nil {
+			return total, fmt.Errorf("nonce: %w", err)
+		}
+		ciphertext := gcm.Seal(nonce, nonce, buf[:n], nil)
+		var lenBuf [4]byte
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(ciphertext)))
+		if _, err := w.Write(lenBuf[:]); err != nil {
+			return total, fmt.Errorf("write len: %w", err)
+		}
+		if _, err := w.Write(ciphertext); err != nil {
+			return total, fmt.Errorf("write chunk: %w", err)
+		}
+		total += int64(n)
+		atomic.StoreInt64(counter, total)
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			break
+		}
+	}
+	if _, err := w.Write([]byte{0, 0, 0, 0}); err != nil {
+		return total, fmt.Errorf("write eos: %w", err)
+	}
+	return total, nil
 }
 
 func decryptStream(r io.Reader, w io.Writer, gcm cipher.AEAD, counter *int64, rl *rateLimiter) (int64, error) {
-        var total int64
-        nonceSize := gcm.NonceSize()
-        for {
-                // Refresh read deadline on each chunk (5 min between chunks)
-                if tc, ok := r.(interface{ SetReadDeadline(time.Time) error }); ok {
-                        tc.SetReadDeadline(time.Now().Add(readTimeout))
-                }
-                var lenBuf [4]byte
-                if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
-                        if err == io.EOF {
-                                break
-                        }
-                        return total, fmt.Errorf("read len: %w", err)
-                }
-                chunkLen := binary.BigEndian.Uint32(lenBuf[:])
-                if chunkLen == 0 {
-                        break
-                }
-                maxChunk := uint32(nonceSize + chunkSize + 16)
-                if chunkLen > maxChunk {
-                        return total, fmt.Errorf("chunk too large: %d (max %d) -- wrong key?", chunkLen, maxChunk)
-                }
-                chunk := make([]byte, chunkLen)
-                if _, err := io.ReadFull(r, chunk); err != nil {
-                        return total, fmt.Errorf("read chunk: %w", err)
-                }
-                plaintext, err := gcm.Open(nil, chunk[:nonceSize], chunk[nonceSize:], nil)
-                if err != nil {
-                        return total, fmt.Errorf("decrypt/auth failed -- wrong key or corrupted data: %w", err)
-                }
-                if rl != nil {
-                        rl.wait(int64(len(plaintext)))
-                }
-                if _, err := w.Write(plaintext); err != nil {
-                        return total, fmt.Errorf("write plaintext: %w", err)
-                }
-                total += int64(len(plaintext))
-                atomic.StoreInt64(counter, total)
-        }
-        return total, nil
+	var total int64
+	nonceSize := gcm.NonceSize()
+	for {
+		// Refresh read deadline on each chunk (5 min between chunks)
+		if tc, ok := r.(interface{ SetReadDeadline(time.Time) error }); ok {
+			tc.SetReadDeadline(time.Now().Add(readTimeout))
+		}
+		var lenBuf [4]byte
+		if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return total, fmt.Errorf("read len: %w", err)
+		}
+		chunkLen := binary.BigEndian.Uint32(lenBuf[:])
+		if chunkLen == 0 {
+			break
+		}
+		maxChunk := uint32(nonceSize + chunkSize + 16)
+		if chunkLen > maxChunk {
+			return total, fmt.Errorf("chunk too large: %d (max %d) -- wrong key?", chunkLen, maxChunk)
+		}
+		chunk := make([]byte, chunkLen)
+		if _, err := io.ReadFull(r, chunk); err != nil {
+			return total, fmt.Errorf("read chunk: %w", err)
+		}
+		plaintext, err := gcm.Open(nil, chunk[:nonceSize], chunk[nonceSize:], nil)
+		if err != nil {
+			return total, fmt.Errorf("decrypt/auth failed -- wrong key or corrupted data: %w", err)
+		}
+		if rl != nil {
+			rl.wait(int64(len(plaintext)))
+		}
+		if _, err := w.Write(plaintext); err != nil {
+			return total, fmt.Errorf("write plaintext: %w", err)
+		}
+		total += int64(len(plaintext))
+		atomic.StoreInt64(counter, total)
+	}
+	return total, nil
 }
 
 // logf writes a timestamped message to stderr (not stdout -- stdout is data).
 func logf(format string, args ...interface{}) {
-        ts := time.Now().Format("2006.01.02 15:04:05")
-        fmt.Fprintf(os.Stderr, "%s  zstream  %s\n", ts, fmt.Sprintf(format, args...))
+	ts := time.Now().Format("2006.01.02 15:04:05")
+	fmt.Fprintf(os.Stderr, "%s  zstream  %s\n", ts, fmt.Sprintf(format, args...))
 }
 
 func fatalf(format string, args ...interface{}) {
-        logf("ERROR "+format, args...)
-        os.Exit(1)
+	logf("ERROR "+format, args...)
+	os.Exit(1)
 }
