@@ -1,4 +1,4 @@
-// zstream -- encrypted TCP stream transport for ZFS replication
+﻿// zstream -- encrypted TCP stream transport for ZFS replication
 //
 // Replaces netcat (nc) in ZFS send/receive pipelines.
 // Uses AES-256-GCM authenticated encryption with a session key
@@ -56,12 +56,14 @@ import (
 	"time"
 )
 
+// version is set via -ldflags "-X main.version=..." at build time
+var version = "1.2.0"
+
 const (
 	chunkSize      = 65536 // 64 KB plaintext per chunk
 	dialTimeout    = 30 * time.Second
 	acceptTimeout  = 120 * time.Second
 	readTimeout    = 5 * 60 * time.Second  // 5 min no-data timeout
-	version        = "1.1.2"
 	defaultBufSize = 128 * 1024 * 1024 // 128 MB
 )
 
