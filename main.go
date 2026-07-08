@@ -73,7 +73,7 @@ import (
 )
 
 // version is set via -ldflags "-X main.version=..." at build time
-var version = "1.3.1"
+var version = "1.3.2"
 
 const (
 	chunkSize      = 65536 // 64 KB plaintext per chunk
@@ -653,6 +653,44 @@ func exitWithChildResult(err error) {
 	os.Exit(1)
 }
 
+// proxyEncryptStream is like encryptStream but forwards whatever bytes are
+// immediately available instead of blocking until a full 64KB chunk is
+// read. encryptStream's io.ReadFull behavior is correct for bulk unidirectional
+// streams (zfs send) but deadlocks an interactive request/response protocol
+// like SSH/SFTP: a client's few-hundred-byte hello would sit buffered
+// forever waiting for 64KB more data that never comes, because the peer is
+// waiting for a reply to that hello first. Used for the local->tunnel
+// direction in proxyDuplex; the tunnel->local (decrypt) direction already
+// forwards each chunk as soon as it arrives, so decryptStream is reused as-is.
+func proxyEncryptStream(r io.Reader, w io.Writer, gcm cipher.AEAD) error {
+	buf := make([]byte, chunkSize)
+	for {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			nonce := make([]byte, gcm.NonceSize())
+			if _, err := rand.Read(nonce); err != nil {
+				return fmt.Errorf("nonce: %w", err)
+			}
+			ciphertext := gcm.Seal(nonce, nonce, buf[:n], nil)
+			var lenBuf [4]byte
+			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(ciphertext)))
+			if _, err := w.Write(lenBuf[:]); err != nil {
+				return fmt.Errorf("write len: %w", err)
+			}
+			if _, err := w.Write(ciphertext); err != nil {
+				return fmt.Errorf("write chunk: %w", err)
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				_, err := w.Write([]byte{0, 0, 0, 0})
+				return err
+			}
+			return fmt.Errorf("read: %w", readErr)
+		}
+	}
+}
+
 // proxyDuplex relays bytes bidirectionally between localConn (plaintext,
 // the wrapped child process) and tunnelConn (encrypted, the peer zstream),
 // using the same chunk framing as listen/send. Half-close is propagated in
@@ -678,11 +716,11 @@ func proxyDuplex(localConn, tunnelConn net.Conn) error {
 		}
 	}()
 
-	// local -> tunnel (encrypt)
+	// local -> tunnel (encrypt, forwarding partial reads immediately --
+	// see proxyEncryptStream doc comment)
 	go func() {
 		defer wg.Done()
-		var counter int64
-		_, err := encryptStream(localConn, tunnelConn, currentGCM, &counter, nil)
+		err := proxyEncryptStream(localConn, tunnelConn, currentGCM)
 		if err != nil {
 			errs[1] = fmt.Errorf("local->tunnel: %w", err)
 		}
