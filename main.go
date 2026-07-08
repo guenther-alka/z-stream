@@ -73,7 +73,7 @@ import (
 )
 
 // version is set via -ldflags "-X main.version=..." at build time
-var version = "1.3.0"
+var version = "1.3.1"
 
 const (
 	chunkSize      = 65536 // 64 KB plaintext per chunk
@@ -590,6 +590,56 @@ func waitForLocalReady(addr string, timeout time.Duration) bool {
 	return false
 }
 
+// watchChild waits for cmd in a background goroutine and returns a channel
+// that is closed when the child has exited, plus a pointer to the resulting
+// error (valid to read only after receiving from/closing of the channel).
+// Using a closed channel (rather than a single buffered value) lets multiple
+// call sites safely wait on child completion without racing to consume a
+// single delivered value.
+func watchChild(cmd *exec.Cmd) (<-chan struct{}, *error) {
+	done := make(chan struct{})
+	var werr error
+	go func() {
+		werr = cmd.Wait()
+		close(done)
+	}()
+	return done, &werr
+}
+
+// acceptRace calls ln.Accept() in a goroutine and returns as soon as either
+// a connection arrives or the child process exits first. Without this, a
+// child that crashes immediately after start (bad args, missing dependency,
+// wrong config) is only discovered once the full accept timeout elapses --
+// which can be minutes -- instead of right away.
+func acceptRace(ln net.Listener, childDone <-chan struct{}, childErr *error, timeout time.Duration) (net.Conn, error) {
+	if tl, ok := ln.(*net.TCPListener); ok {
+		tl.SetDeadline(time.Now().Add(timeout))
+	}
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	acceptCh := make(chan result, 1)
+	go func() {
+		c, e := ln.Accept()
+		acceptCh <- result{c, e}
+	}()
+
+	select {
+	case r := <-acceptCh:
+		return r.conn, r.err
+	case <-childDone:
+		we := *childErr
+		if we == nil {
+			return nil, fmt.Errorf("child exited (code 0) before connecting -- misconfigured command?")
+		}
+		if ee, ok := we.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("child exited with code %d before connecting", ee.ExitCode())
+		}
+		return nil, fmt.Errorf("child exited before connecting: %w", we)
+	}
+}
+
 // exitWithChildResult exits the process with the child's exit code, so a
 // caller checking zstream's own exit status sees the wrapped command's result.
 func exitWithChildResult(err error) {
@@ -670,8 +720,7 @@ func doTunnelListen(port, keystr string, opts options, childArgs []string) {
 	if err := cmd.Start(); err != nil {
 		fatalf("cannot start child %q: %v", childArgs[0], err)
 	}
-	childDone := make(chan error, 1)
-	go func() { childDone <- cmd.Wait() }()
+	childDone, childErr := watchChild(cmd)
 
 	if !waitForLocalReady(opts.local, localReadyWait) {
 		_ = cmd.Process.Kill()
@@ -687,13 +736,12 @@ func doTunnelListen(port, keystr string, opts options, childArgs []string) {
 		<-childDone
 		fatalf("listen %s: %v", listenAddr, err)
 	}
-	ln.(*net.TCPListener).SetDeadline(time.Now().Add(acceptTimeout))
-	tunnelConn, err := ln.Accept()
+	tunnelConn, aerr := acceptRace(ln, childDone, childErr, acceptTimeout)
 	ln.Close()
-	if err != nil {
+	if aerr != nil {
 		_ = cmd.Process.Kill()
 		<-childDone
-		fatalf("accept (timeout %s): %v", acceptTimeout, err)
+		fatalf("accept (timeout %s): %v", acceptTimeout, aerr)
 	}
 	logf("tunnel connection from %s", tunnelConn.RemoteAddr())
 	tunnelConn.SetReadDeadline(time.Now().Add(readTimeout))
@@ -764,17 +812,15 @@ func doTunnelSend(host, port, keystr string, opts options, childArgs []string) {
 		tunnelConn.Close()
 		fatalf("cannot start child %q: %v", childArgs[0], err)
 	}
-	childDone := make(chan error, 1)
-	go func() { childDone <- cmd.Wait() }()
+	childDone, childErr := watchChild(cmd)
 
-	ln.(*net.TCPListener).SetDeadline(time.Now().Add(acceptTimeout))
-	localConn, err := ln.Accept()
+	localConn, aerr := acceptRace(ln, childDone, childErr, acceptTimeout)
 	ln.Close()
-	if err != nil {
+	if aerr != nil {
 		_ = cmd.Process.Kill()
 		<-childDone
 		tunnelConn.Close()
-		fatalf("accept local (timeout %s): %v -- child never connected to --local", acceptTimeout, err)
+		fatalf("accept local (timeout %s): %v -- child never connected to --local", acceptTimeout, aerr)
 	}
 
 	if perr := proxyDuplex(localConn, tunnelConn); perr != nil {
@@ -784,8 +830,8 @@ func doTunnelSend(host, port, keystr string, opts options, childArgs []string) {
 	tunnelConn.Close()
 
 	select {
-	case werr := <-childDone:
-		exitWithChildResult(werr)
+	case <-childDone:
+		exitWithChildResult(*childErr)
 	case <-time.After(childExitWait):
 		_ = cmd.Process.Kill()
 		<-childDone
