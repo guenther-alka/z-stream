@@ -1,4 +1,4 @@
-﻿// zstream -- encrypted TCP stream transport for ZFS replication
+// zstream -- encrypted TCP stream transport for ZFS replication
 //
 // Replaces netcat (nc) in ZFS send/receive pipelines.
 // Uses AES-256-GCM authenticated encryption with a session key
@@ -12,6 +12,17 @@
 //   Sender:
 //     zfs send tank@snap | zstream send <host> <port> <key> [options]
 //
+//   Tunnel mode (bidirectional encrypted TCP proxy wrapping a child process,
+//   used by job-filesync.pl for rclone-over-SFTP transfers):
+//     Receiver side (spawns the server, e.g. "rclone serve sftp"):
+//       zstream tunnel-listen <port> <key> --local=127.0.0.1:LPORT -- <cmd...>
+//     Sender side (spawns the client, e.g. "rclone sync ... :sftp:"):
+//       zstream tunnel-send <host> <port> <key> --local=127.0.0.1:LPORT -- <cmd...>
+//   In both cases --local=ADDR is the local TCP address the child process
+//   binds to (tunnel-listen) or connects to (tunnel-send); zstream proxies
+//   all bytes between that local connection and the encrypted tunnel
+//   connection to the peer. zstream exits with the child process's exit code.
+//
 // Options:
 //   --buf=128m      Read-ahead buffer size (default 128m). 0 = disabled.
 //                   Units: k, m, g (e.g. --buf=256m)
@@ -22,6 +33,8 @@
 //                   Example: --log=/tmp/zstream.log
 //   --bind=IP       Bind listener to IP (default: 0.0.0.0)
 //                   Example: --bind=192.168.1.10
+//   --local=ADDR    (tunnel-listen/tunnel-send only) local address the
+//                   wrapped child process binds to or connects to.
 //
 // Key:
 //   Any string (hex preferred). job-replicate.pl passes sha256_hex(time+ips+snap).
@@ -31,7 +44,8 @@
 //   [4 bytes BE chunk length][AES-256-GCM nonce 12 bytes][ciphertext][tag 16 bytes]
 //   Each chunk is up to 64KB of plaintext, independently encrypted.
 //   Chunk length covers nonce+ciphertext+tag (not plaintext length).
-//   A zero-length chunk (4 zero bytes) signals end of stream.
+//   A zero-length chunk (4 zero bytes) signals end of stream (or, in tunnel
+//   mode, end of one direction -- see proxyDuplex).
 //
 // Build:
 //   See zstream.info for per-platform build instructions.
@@ -50,30 +64,35 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 // version is set via -ldflags "-X main.version=..." at build time
-var version = "1.2.0"
+var version = "1.3.0"
 
 const (
 	chunkSize      = 65536 // 64 KB plaintext per chunk
 	dialTimeout    = 30 * time.Second
 	acceptTimeout  = 120 * time.Second
-	readTimeout    = 5 * 60 * time.Second  // 5 min no-data timeout
-	defaultBufSize = 128 * 1024 * 1024 // 128 MB
+	readTimeout    = 5 * 60 * time.Second // 5 min no-data timeout
+	defaultBufSize = 128 * 1024 * 1024    // 128 MB
+	localReadyWait = 30 * time.Second     // how long to wait for child to bind --local
+	childExitWait  = 10 * time.Second     // how long to wait for child after tunnel closes
 )
 
 // options holds parsed CLI flags
 type options struct {
-	bufSize  int64  // 0 = disabled
-	rateHz   int64  // bytes/sec, 0 = unlimited
+	bufSize  int64 // 0 = disabled
+	rateHz   int64 // bytes/sec, 0 = unlimited
 	progress bool
 	logFile  string
 	bind     string // listen bind address, default 0.0.0.0
+	local    string // tunnel-listen/tunnel-send: local address for child process
 }
 
 // parseSize parses "128m", "1g", "512k", or plain bytes
@@ -127,11 +146,25 @@ func parseFlags(args []string) ([]string, options, error) {
 			opts.logFile = strings.TrimPrefix(a, "--log=")
 		case strings.HasPrefix(a, "--bind="):
 			opts.bind = strings.TrimPrefix(a, "--bind=")
+		case strings.HasPrefix(a, "--local="):
+			opts.local = strings.TrimPrefix(a, "--local=")
 		default:
 			pos = append(pos, a)
 		}
 	}
 	return pos, opts, nil
+}
+
+// splitDashDash splits args at the first standalone "--" token.
+// Everything before is zstream's own args; everything after is a child
+// command + its args, to be exec'd directly (no shell involved).
+func splitDashDash(args []string) ([]string, []string) {
+	for i, a := range args {
+		if a == "--" {
+			return args[:i], args[i+1:]
+		}
+	}
+	return args, nil
 }
 
 // fmtBytes formats bytes as human-readable string
@@ -226,7 +259,7 @@ func (pr *progressReporter) run() {
 		case <-ticker.C:
 			cur := atomic.LoadInt64(pr.counter)
 			elapsed := time.Since(start)
-			speed := float64(cur-lastBytes) // bytes in last second
+			speed := float64(cur - lastBytes) // bytes in last second
 			lastBytes = cur
 			fmt.Fprintf(os.Stderr, "\r  %s | %s/s | %s   ",
 				fmtBytes(cur), fmtBytes(int64(speed)), fmtDuration(elapsed))
@@ -318,6 +351,46 @@ func main() {
 			fatalf("key too short (min 8 chars) -- empty or weak key rejected")
 		}
 		doSend(pos[0], pos[1], pos[2], opts)
+	case "tunnel-listen":
+		ownArgs, childArgs := splitDashDash(os.Args[2:])
+		pos, opts, err := parseFlags(ownArgs)
+		if err != nil {
+			fatalf("%v", err)
+		}
+		if len(pos) != 2 {
+			fmt.Fprintf(os.Stderr, "usage: zstream tunnel-listen <port> <key> --local=ADDR [options] -- <cmd> [args...]\n")
+			os.Exit(1)
+		}
+		if len(pos[1]) < 8 {
+			fatalf("key too short (min 8 chars) -- empty or weak key rejected")
+		}
+		if opts.local == "" {
+			fatalf("tunnel-listen requires --local=ADDR (local address the child process binds to)")
+		}
+		if len(childArgs) == 0 {
+			fatalf("tunnel-listen requires a child command after --")
+		}
+		doTunnelListen(pos[0], pos[1], opts, childArgs)
+	case "tunnel-send":
+		ownArgs, childArgs := splitDashDash(os.Args[2:])
+		pos, opts, err := parseFlags(ownArgs)
+		if err != nil {
+			fatalf("%v", err)
+		}
+		if len(pos) != 3 {
+			fmt.Fprintf(os.Stderr, "usage: zstream tunnel-send <host> <port> <key> --local=ADDR [options] -- <cmd> [args...]\n")
+			os.Exit(1)
+		}
+		if len(pos[2]) < 8 {
+			fatalf("key too short (min 8 chars) -- empty or weak key rejected")
+		}
+		if opts.local == "" {
+			fatalf("tunnel-send requires --local=ADDR (local address the child process connects to)")
+		}
+		if len(childArgs) == 0 {
+			fatalf("tunnel-send requires a child command after --")
+		}
+		doTunnelSend(pos[0], pos[1], pos[2], opts, childArgs)
 	case "version", "--version", "-v":
 		fmt.Printf("zstream %s\n", version)
 	default:
@@ -331,18 +404,24 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "Usage:\n")
 	fmt.Fprintf(os.Stderr, "  zstream listen <port> <key> [options]          listen and decrypt to stdout\n")
 	fmt.Fprintf(os.Stderr, "  zstream send   <host> <port> <key> [options]   encrypt stdin and send\n")
+	fmt.Fprintf(os.Stderr, "  zstream tunnel-listen <port> <key> --local=ADDR -- <cmd>   spawn cmd, proxy to ADDR\n")
+	fmt.Fprintf(os.Stderr, "  zstream tunnel-send <host> <port> <key> --local=ADDR -- <cmd>   spawn cmd, proxy from ADDR\n")
 	fmt.Fprintf(os.Stderr, "  zstream version                                print version\n\n")
 	fmt.Fprintf(os.Stderr, "Options:\n")
 	fmt.Fprintf(os.Stderr, "  --buf=SIZE      read-ahead buffer (default 128m, 0=off)  e.g. --buf=256m\n")
 	fmt.Fprintf(os.Stderr, "  --rate=SPEED    throughput limit (default off)           e.g. --rate=50m\n")
 	fmt.Fprintf(os.Stderr, "  --progress      show live progress on stderr\n")
 	fmt.Fprintf(os.Stderr, "  --log=FILE      append transfer summary to FILE\n")
-	fmt.Fprintf(os.Stderr, "  --bind=IP       bind listener to IP (default 0.0.0.0)\n\n")
+	fmt.Fprintf(os.Stderr, "  --bind=IP       bind listener to IP (default 0.0.0.0)\n")
+	fmt.Fprintf(os.Stderr, "  --local=ADDR    tunnel mode: local address for the wrapped child process\n\n")
 	fmt.Fprintf(os.Stderr, "Example:\n")
 	fmt.Fprintf(os.Stderr, "  # Receiver:\n")
 	fmt.Fprintf(os.Stderr, "  zstream listen 9000 MYKEY | zfs receive -F tank/backup\n\n")
 	fmt.Fprintf(os.Stderr, "  # Sender (rate-limited, with log):\n")
-	fmt.Fprintf(os.Stderr, "  zfs send tank@snap | zstream send 192.168.1.10 9000 MYKEY --rate=100m --log=/tmp/zstream.log\n")
+	fmt.Fprintf(os.Stderr, "  zfs send tank@snap | zstream send 192.168.1.10 9000 MYKEY --rate=100m --log=/tmp/zstream.log\n\n")
+	fmt.Fprintf(os.Stderr, "  # Tunnel (rclone-over-sftp folder sync):\n")
+	fmt.Fprintf(os.Stderr, "  zstream tunnel-listen 9100 MYKEY --local=127.0.0.1:9101 -- rclone serve sftp /data --addr 127.0.0.1:9101\n")
+	fmt.Fprintf(os.Stderr, "  zstream tunnel-send HOST 9100 MYKEY --local=127.0.0.1:9101 -- rclone sync /src :sftp: --sftp-host=127.0.0.1 --sftp-port=9101\n")
 }
 
 // deriveKey derives a 32-byte AES key from an arbitrary string via SHA-256.
@@ -493,6 +572,227 @@ func doSend(host, port, keystr string, opts options) {
 	writeStats(opts.logFile, "send", total, elapsed, opts)
 }
 
+// -- Tunnel mode: bidirectional encrypted TCP proxy wrapping a child process --
+
+// waitForLocalReady polls addr until a TCP connection succeeds or timeout.
+// Used on the tunnel-listen side to wait for the child process to bind its
+// local listener before we accept the encrypted tunnel connection.
+func waitForLocalReady(addr string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err == nil {
+			c.Close()
+			return true
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return false
+}
+
+// exitWithChildResult exits the process with the child's exit code, so a
+// caller checking zstream's own exit status sees the wrapped command's result.
+func exitWithChildResult(err error) {
+	if err == nil {
+		os.Exit(0)
+	}
+	if ee, ok := err.(*exec.ExitError); ok {
+		os.Exit(ee.ExitCode())
+	}
+	logf("child wait error: %v", err)
+	os.Exit(1)
+}
+
+// proxyDuplex relays bytes bidirectionally between localConn (plaintext,
+// the wrapped child process) and tunnelConn (encrypted, the peer zstream),
+// using the same chunk framing as listen/send. Half-close is propagated in
+// both directions: when one side reaches EOF, the corresponding write side
+// of the other connection is closed, so a normal SFTP session (which closes
+// cleanly on both ends) shuts down the whole proxy without needing external
+// signaling.
+func proxyDuplex(localConn, tunnelConn net.Conn) error {
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+
+	// tunnel -> local (decrypt)
+	go func() {
+		defer wg.Done()
+		var counter int64
+		_, err := decryptStream(tunnelConn, localConn, currentGCM, &counter, nil)
+		if err != nil {
+			errs[0] = fmt.Errorf("tunnel->local: %w", err)
+		}
+		if tc, ok := localConn.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
+	}()
+
+	// local -> tunnel (encrypt)
+	go func() {
+		defer wg.Done()
+		var counter int64
+		_, err := encryptStream(localConn, tunnelConn, currentGCM, &counter, nil)
+		if err != nil {
+			errs[1] = fmt.Errorf("local->tunnel: %w", err)
+		}
+		if tc, ok := tunnelConn.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
+	}()
+
+	wg.Wait()
+	if errs[0] != nil {
+		return errs[0]
+	}
+	return errs[1]
+}
+
+// currentGCM is set once per process before proxyDuplex is used. Tunnel mode
+// only ever uses a single cipher per process (one tunnel per zstream
+// invocation), so a package-level var avoids threading it through both
+// proxy goroutines separately.
+var currentGCM cipher.AEAD
+
+// doTunnelListen spawns the child command, waits for it to bind opts.local,
+// accepts one encrypted tunnel connection on port, and proxies between them.
+func doTunnelListen(port, keystr string, opts options, childArgs []string) {
+	gcm, err := newGCM(keystr)
+	if err != nil {
+		fatalf("cipher init: %v", err)
+	}
+	currentGCM = gcm
+
+	logf("tunnel-listen: starting child: %s", strings.Join(childArgs, " "))
+	cmd := exec.Command(childArgs[0], childArgs[1:]...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		fatalf("cannot start child %q: %v", childArgs[0], err)
+	}
+	childDone := make(chan error, 1)
+	go func() { childDone <- cmd.Wait() }()
+
+	if !waitForLocalReady(opts.local, localReadyWait) {
+		_ = cmd.Process.Kill()
+		<-childDone
+		fatalf("child did not start listening on %s within %s", opts.local, localReadyWait)
+	}
+	logf("child is listening on %s", opts.local)
+
+	listenAddr := opts.bind + ":" + port
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		<-childDone
+		fatalf("listen %s: %v", listenAddr, err)
+	}
+	ln.(*net.TCPListener).SetDeadline(time.Now().Add(acceptTimeout))
+	tunnelConn, err := ln.Accept()
+	ln.Close()
+	if err != nil {
+		_ = cmd.Process.Kill()
+		<-childDone
+		fatalf("accept (timeout %s): %v", acceptTimeout, err)
+	}
+	logf("tunnel connection from %s", tunnelConn.RemoteAddr())
+	tunnelConn.SetReadDeadline(time.Now().Add(readTimeout))
+
+	localConn, err := net.DialTimeout("tcp", opts.local, 10*time.Second)
+	if err != nil {
+		tunnelConn.Close()
+		_ = cmd.Process.Kill()
+		<-childDone
+		fatalf("connect local %s: %v", opts.local, err)
+	}
+
+	perr := proxyDuplex(localConn, tunnelConn)
+	localConn.Close()
+	tunnelConn.Close()
+
+	// The child here is a persistent server (e.g. "rclone serve sftp") --
+	// it is expected to keep running until killed, not to exit on its own.
+	// A clean proxy session ending means the transfer finished; kill the
+	// server now instead of waiting for a voluntary exit that won't happen.
+	_ = cmd.Process.Kill()
+	<-childDone
+	if perr != nil {
+		fatalf("proxy error: %v", perr)
+	}
+	os.Exit(0)
+}
+
+// doTunnelSend opens a local listener on opts.local, connects the encrypted
+// tunnel to host:port, spawns the child command (which connects into the
+// local listener), and proxies between them.
+func doTunnelSend(host, port, keystr string, opts options, childArgs []string) {
+	gcm, err := newGCM(keystr)
+	if err != nil {
+		fatalf("cipher init: %v", err)
+	}
+	currentGCM = gcm
+
+	ln, err := net.Listen("tcp", opts.local)
+	if err != nil {
+		fatalf("listen local %s: %v", opts.local, err)
+	}
+
+	addr := net.JoinHostPort(host, port)
+	var tunnelConn net.Conn
+	deadline := time.Now().Add(dialTimeout)
+	for {
+		tunnelConn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			ln.Close()
+			fatalf("connect %s: %v", addr, err)
+		}
+		logf("connect %s failed, retrying... (%v)", addr, err)
+		time.Sleep(2 * time.Second)
+	}
+	logf("connected to %s", addr)
+	tunnelConn.SetReadDeadline(time.Now().Add(readTimeout))
+
+	logf("tunnel-send: starting child: %s", strings.Join(childArgs, " "))
+	cmd := exec.Command(childArgs[0], childArgs[1:]...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		ln.Close()
+		tunnelConn.Close()
+		fatalf("cannot start child %q: %v", childArgs[0], err)
+	}
+	childDone := make(chan error, 1)
+	go func() { childDone <- cmd.Wait() }()
+
+	ln.(*net.TCPListener).SetDeadline(time.Now().Add(acceptTimeout))
+	localConn, err := ln.Accept()
+	ln.Close()
+	if err != nil {
+		_ = cmd.Process.Kill()
+		<-childDone
+		tunnelConn.Close()
+		fatalf("accept local (timeout %s): %v -- child never connected to --local", acceptTimeout, err)
+	}
+
+	if perr := proxyDuplex(localConn, tunnelConn); perr != nil {
+		logf("proxy error: %v", perr)
+	}
+	localConn.Close()
+	tunnelConn.Close()
+
+	select {
+	case werr := <-childDone:
+		exitWithChildResult(werr)
+	case <-time.After(childExitWait):
+		_ = cmd.Process.Kill()
+		<-childDone
+		fatalf("child did not exit within %s after tunnel closed", childExitWait)
+	}
+}
+
 // -- Buffered variants (producer goroutine + channel) --
 
 type chunk struct {
@@ -637,7 +937,7 @@ func decryptStreamBuffered(r io.Reader, w io.Writer, gcm cipher.AEAD, bufSize in
 	return total, nil
 }
 
-// -- Unbuffered variants (original, used when --buf=0) --
+// -- Unbuffered variants (original, used when --buf=0, and always in tunnel mode) --
 
 func encryptStream(r io.Reader, w io.Writer, gcm cipher.AEAD, counter *int64, rl *rateLimiter) (int64, error) {
 	buf := make([]byte, chunkSize)

@@ -88,7 +88,7 @@ jobs:
 
             Encrypted TCP stream transport for ZFS replication and folder sync.
             Replaces netcat in ZFS send/receive pipelines.
-            New in v1.2.0: tunnel-listen/tunnel-send for bidirectional encrypted proxy (e.g. rclone).
+            New in v1.3.0: tunnel-listen/tunnel-send for bidirectional encrypted proxy (e.g. rclone), with required --local=ADDR.
             Used by csweb-gui job-replicate for encrypted ZFS send/receive.
 
             ### Downloads
@@ -113,15 +113,17 @@ jobs:
             zfs send tank@snap | zstream send 192.168.1.10 9000 SESSIONKEY
             ```
 
-            ### Tunnel mode (new in v1.2.0)
+            ### Tunnel mode (new in v1.3.0)
             ```
-            # Folder sync via rclone over encrypted tunnel:
+            # Folder sync via rclone over encrypted tunnel.
+            # --local=ADDR is required: the local address the wrapped child
+            # process binds to (tunnel-listen) or connects to (tunnel-send).
 
             # Receiver (start first):
-            zstream tunnel-listen 9000 KEY -- rclone serve sftp /dst --addr 127.0.0.1:2222
+            zstream tunnel-listen 9000 KEY --local=127.0.0.1:2222 -- rclone serve sftp /dst --addr 127.0.0.1:2222
 
             # Sender:
-            zstream tunnel-send HOST 9000 KEY -- rclone sync /src sftp://127.0.0.1:2222/
+            zstream tunnel-send HOST 9000 KEY --local=127.0.0.1:2222 -- rclone sync /src :sftp: --sftp-host=127.0.0.1 --sftp-port=2222
             ```
 
             ### Install (csweb-gui)
