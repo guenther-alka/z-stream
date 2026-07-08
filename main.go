@@ -73,7 +73,7 @@ import (
 )
 
 // version is set via -ldflags "-X main.version=..." at build time
-var version = "1.3.2"
+var version = "1.3.3"
 
 const (
 	chunkSize      = 65536 // 64 KB plaintext per chunk
@@ -743,7 +743,25 @@ func proxyDuplex(localConn, tunnelConn net.Conn) error {
 var currentGCM cipher.AEAD
 
 // doTunnelListen spawns the child command, waits for it to bind opts.local,
-// accepts one encrypted tunnel connection on port, and proxies between them.
+// and proxies MULTIPLE encrypted tunnel connections between the peer and the
+// child for as long as the child stays alive (one accept+proxy per session,
+// each in its own goroutine).
+//
+// MULTI-SESSION (cs_26.07.08, was single-connection-only through v1.3.2):
+// a single connection was correct for the original zfs-send|nc use case
+// (one continuous stream, then done), but wrong for tunnel mode wrapping an
+// interactive protocol like rclone-over-SFTP: rclone's SFTP client opens a
+// SEPARATE connection for directory listing, for SetModTime/metadata calls,
+// and (independently) one per concurrent file transfer -- confirmed live,
+// even --transfers=1 still needed >1 connection as soon as the source had
+// any subdirectory at all (List + SetModTime on that subdirectory each
+// needed their own connection). The child process (e.g. "rclone serve sftp")
+// is long-lived and expects to serve many client sessions, not just one.
+// currentGCM is shared across all concurrent sessions safely: every chunk
+// gets an independent random 96-bit nonce (see proxyEncryptStream/
+// encryptStreamBuffered), and Go's stdlib GCM Seal/Open hold no mutable
+// state between calls -- so concurrent Seal/Open on the same cipher.AEAD
+// from multiple goroutines is safe without any additional locking.
 func doTunnelListen(port, keystr string, opts options, childArgs []string) {
 	gcm, err := newGCM(keystr)
 	if err != nil {
@@ -774,43 +792,81 @@ func doTunnelListen(port, keystr string, opts options, childArgs []string) {
 		<-childDone
 		fatalf("listen %s: %v", listenAddr, err)
 	}
-	tunnelConn, aerr := acceptRace(ln, childDone, childErr, acceptTimeout)
+
+	var wg sync.WaitGroup
+	sessionN := 0
+
+	for {
+		tunnelConn, aerr := acceptRace(ln, childDone, childErr, acceptTimeout)
+		if aerr != nil {
+			select {
+			case <-childDone:
+				// Child exited -- expected end of the loop once at least one
+				// session has run; a hard error if it exited before ANY
+				// session connected at all (same fast-fail this had pre-multi-
+				// session: a dead/misconfigured child is reported immediately
+				// instead of silently "succeeding" with zero sessions).
+				if sessionN == 0 {
+					ln.Close()
+					fatalf("child exited before any tunnel session connected")
+				}
+			default:
+				// Plain accept timeout with the child still alive -- no new
+				// session for a while is normal between file batches; keep
+				// waiting rather than giving up.
+				if sessionN == 0 {
+					ln.Close()
+					_ = cmd.Process.Kill()
+					<-childDone
+					fatalf("accept (timeout %s): %v", acceptTimeout, aerr)
+				}
+				continue
+			}
+			break
+		}
+		sessionN++
+		n := sessionN
+		logf("tunnel connection #%d from %s", n, tunnelConn.RemoteAddr())
+		tunnelConn.SetReadDeadline(time.Now().Add(readTimeout))
+
+		localConn, err := net.DialTimeout("tcp", opts.local, 10*time.Second)
+		if err != nil {
+			logf("connect local %s (session #%d): %v", opts.local, n, err)
+			tunnelConn.Close()
+			continue
+		}
+
+		wg.Add(1)
+		go func(lc, tc net.Conn, num int) {
+			defer wg.Done()
+			if perr := proxyDuplex(lc, tc); perr != nil {
+				logf("proxy error (session #%d): %v", num, perr)
+			}
+			lc.Close()
+			tc.Close()
+		}(localConn, tunnelConn, n)
+	}
+
 	ln.Close()
-	if aerr != nil {
-		_ = cmd.Process.Kill()
-		<-childDone
-		fatalf("accept (timeout %s): %v", acceptTimeout, aerr)
-	}
-	logf("tunnel connection from %s", tunnelConn.RemoteAddr())
-	tunnelConn.SetReadDeadline(time.Now().Add(readTimeout))
-
-	localConn, err := net.DialTimeout("tcp", opts.local, 10*time.Second)
-	if err != nil {
-		tunnelConn.Close()
-		_ = cmd.Process.Kill()
-		<-childDone
-		fatalf("connect local %s: %v", opts.local, err)
-	}
-
-	perr := proxyDuplex(localConn, tunnelConn)
-	localConn.Close()
-	tunnelConn.Close()
+	wg.Wait()
 
 	// The child here is a persistent server (e.g. "rclone serve sftp") --
 	// it is expected to keep running until killed, not to exit on its own.
-	// A clean proxy session ending means the transfer finished; kill the
+	// All sessions have ended (peer closed the encrypted tunnel for good,
+	// or the child was killed externally by the caller's cleanup); stop the
 	// server now instead of waiting for a voluntary exit that won't happen.
 	_ = cmd.Process.Kill()
 	<-childDone
-	if perr != nil {
-		fatalf("proxy error: %v", perr)
-	}
 	os.Exit(0)
 }
 
-// doTunnelSend opens a local listener on opts.local, connects the encrypted
-// tunnel to host:port, spawns the child command (which connects into the
-// local listener), and proxies between them.
+// doTunnelSend opens a local listener on opts.local, spawns the child
+// command (which connects into the local listener), and for EACH local
+// connection dials a FRESH encrypted tunnel connection to host:port and
+// proxies the pair -- for as long as the child stays alive. See
+// doTunnelListen's doc comment for why one session is not enough (rclone's
+// SFTP client opens separate connections for listing/metadata/transfers,
+// each independent of --transfers concurrency).
 func doTunnelSend(host, port, keystr string, opts options, childArgs []string) {
 	gcm, err := newGCM(keystr)
 	if err != nil {
@@ -824,10 +880,15 @@ func doTunnelSend(host, port, keystr string, opts options, childArgs []string) {
 	}
 
 	addr := net.JoinHostPort(host, port)
-	var tunnelConn net.Conn
+
+	// Upfront reachability check (same as pre-multi-session): dial once
+	// before even starting the child, so an unreachable receiver is reported
+	// immediately instead of only once the child makes its first request.
+	// This first tunnel connection becomes session #1.
+	var firstTunnelConn net.Conn
 	deadline := time.Now().Add(dialTimeout)
 	for {
-		tunnelConn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+		firstTunnelConn, err = net.DialTimeout("tcp", addr, 5*time.Second)
 		if err == nil {
 			break
 		}
@@ -839,7 +900,7 @@ func doTunnelSend(host, port, keystr string, opts options, childArgs []string) {
 		time.Sleep(2 * time.Second)
 	}
 	logf("connected to %s", addr)
-	tunnelConn.SetReadDeadline(time.Now().Add(readTimeout))
+	firstTunnelConn.SetReadDeadline(time.Now().Add(readTimeout))
 
 	logf("tunnel-send: starting child: %s", strings.Join(childArgs, " "))
 	cmd := exec.Command(childArgs[0], childArgs[1:]...)
@@ -847,25 +908,71 @@ func doTunnelSend(host, port, keystr string, opts options, childArgs []string) {
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		ln.Close()
-		tunnelConn.Close()
+		firstTunnelConn.Close()
 		fatalf("cannot start child %q: %v", childArgs[0], err)
 	}
 	childDone, childErr := watchChild(cmd)
 
-	localConn, aerr := acceptRace(ln, childDone, childErr, acceptTimeout)
-	ln.Close()
-	if aerr != nil {
-		_ = cmd.Process.Kill()
-		<-childDone
-		tunnelConn.Close()
-		fatalf("accept local (timeout %s): %v -- child never connected to --local", acceptTimeout, aerr)
+	var wg sync.WaitGroup
+	sessionN := 0
+
+	// pairSession dials a fresh tunnel connection (reusing firstTunnelConn
+	// for session #1) and proxies it with the given local connection.
+	pairSession := func(localConn net.Conn, reuseTunnelConn net.Conn) {
+		sessionN++
+		n := sessionN
+		tunnelConn := reuseTunnelConn
+		if tunnelConn == nil {
+			tc, derr := net.DialTimeout("tcp", addr, 10*time.Second)
+			if derr != nil {
+				logf("connect %s (session #%d): %v", addr, n, derr)
+				localConn.Close()
+				return
+			}
+			tunnelConn = tc
+			tunnelConn.SetReadDeadline(time.Now().Add(readTimeout))
+			logf("connected to %s (session #%d)", addr, n)
+		}
+		wg.Add(1)
+		go func(lc, tc net.Conn, num int) {
+			defer wg.Done()
+			if perr := proxyDuplex(lc, tc); perr != nil {
+				logf("proxy error (session #%d): %v", num, perr)
+			}
+			lc.Close()
+			tc.Close()
+		}(localConn, tunnelConn, n)
 	}
 
-	if perr := proxyDuplex(localConn, tunnelConn); perr != nil {
-		logf("proxy error: %v", perr)
+	firstLocalConn, aerr := acceptRace(ln, childDone, childErr, acceptTimeout)
+	if aerr != nil {
+		ln.Close()
+		_ = cmd.Process.Kill()
+		<-childDone
+		firstTunnelConn.Close()
+		fatalf("accept local (timeout %s): %v -- child never connected to --local", acceptTimeout, aerr)
 	}
-	localConn.Close()
-	tunnelConn.Close()
+	pairSession(firstLocalConn, firstTunnelConn)
+
+	for {
+		localConn, aerr := acceptRace(ln, childDone, childErr, acceptTimeout)
+		if aerr != nil {
+			select {
+			case <-childDone:
+				// Child exited -- normal end, at least one session ran.
+			default:
+				// Accept timeout with the child still alive -- keep waiting;
+				// no new local connection for a while is normal between
+				// file batches.
+				continue
+			}
+			break
+		}
+		pairSession(localConn, nil)
+	}
+
+	ln.Close()
+	wg.Wait()
 
 	select {
 	case <-childDone:
