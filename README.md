@@ -1,4 +1,4 @@
-# z-stream
+# cs-stream
 
 Encrypted TCP stream transport for ZFS replication. Replaces ssh, mbuffer, netcat (nc) and pv in ZFS send/receive pipelines.
 
