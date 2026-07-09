@@ -1,4 +1,4 @@
-// zstream -- encrypted TCP stream transport for ZFS replication
+// cs-stream -- encrypted TCP stream transport for ZFS replication
 //
 // Replaces netcat (nc) in ZFS send/receive pipelines.
 // Uses AES-256-GCM authenticated encryption with a session key
@@ -6,22 +6,22 @@
 //
 // Usage:
 //   Receiver (start first):
-//     zstream listen <port> <key> [options]
-//     zfs receive -F tank/backup < <(zstream listen <port> <key>)
+//     cs-stream listen <port> <key> [options]
+//     zfs receive -F tank/backup < <(cs-stream listen <port> <key>)
 //
 //   Sender:
-//     zfs send tank@snap | zstream send <host> <port> <key> [options]
+//     zfs send tank@snap | cs-stream send <host> <port> <key> [options]
 //
 //   Tunnel mode (bidirectional encrypted TCP proxy wrapping a child process,
 //   used by job-filesync.pl for rclone-over-SFTP transfers):
 //     Receiver side (spawns the server, e.g. "rclone serve sftp"):
-//       zstream tunnel-listen <port> <key> --local=127.0.0.1:LPORT -- <cmd...>
+//       cs-stream tunnel-listen <port> <key> --local=127.0.0.1:LPORT -- <cmd...>
 //     Sender side (spawns the client, e.g. "rclone sync ... :sftp:"):
-//       zstream tunnel-send <host> <port> <key> --local=127.0.0.1:LPORT -- <cmd...>
+//       cs-stream tunnel-send <host> <port> <key> --local=127.0.0.1:LPORT -- <cmd...>
 //   In both cases --local=ADDR is the local TCP address the child process
-//   binds to (tunnel-listen) or connects to (tunnel-send); zstream proxies
+//   binds to (tunnel-listen) or connects to (tunnel-send); cs-stream proxies
 //   all bytes between that local connection and the encrypted tunnel
-//   connection to the peer. zstream exits with the child process's exit code.
+//   connection to the peer. cs-stream exits with the child process's exit code.
 //
 // Options:
 //   --buf=128m      Read-ahead buffer size (default 128m). 0 = disabled.
@@ -30,7 +30,7 @@
 //                   Units: k, m, g per second (e.g. --rate=100m)
 //   --progress      Show live progress on stderr (default: off)
 //   --log=FILE      Write transfer summary to FILE (default: off)
-//                   Example: --log=/tmp/zstream.log
+//                   Example: --log=/tmp/cs-stream.log
 //   --bind=IP       Bind listener to IP (default: 0.0.0.0)
 //                   Example: --bind=192.168.1.10
 //   --local=ADDR    (tunnel-listen/tunnel-send only) local address the
@@ -48,7 +48,7 @@
 //   mode, end of one direction -- see proxyDuplex).
 //
 // Build:
-//   See zstream.info for per-platform build instructions.
+//   See cs-stream.info for per-platform build instructions.
 //
 // License: BSD 2-Clause -- Copyright (c) 2026 Guenther Alka / napp-it.org
 
@@ -73,7 +73,7 @@ import (
 )
 
 // version is set via -ldflags "-X main.version=..." at build time
-var version = "1.3.3"
+var version = "2.0.0"
 
 const (
 	chunkSize      = 65536 // 64 KB plaintext per chunk
@@ -156,7 +156,7 @@ func parseFlags(args []string) ([]string, options, error) {
 }
 
 // splitDashDash splits args at the first standalone "--" token.
-// Everything before is zstream's own args; everything after is a child
+// Everything before is cs-stream's own args; everything after is a child
 // command + its args, to be exec'd directly (no shell involved).
 func splitDashDash(args []string) ([]string, []string) {
 	for i, a := range args {
@@ -289,7 +289,7 @@ func writeStats(logFile string, mode string, total int64, elapsed time.Duration,
 	}
 
 	lines := []string{
-		fmt.Sprintf("zstream %s  mode=%-6s  transferred=%s  time=%s  speed=%s/s  buf=%s  rate=%s",
+		fmt.Sprintf("cs-stream %s  mode=%-6s  transferred=%s  time=%s  speed=%s/s  buf=%s  rate=%s",
 			version, mode,
 			fmtBytes(total),
 			fmtDuration(elapsed),
@@ -331,7 +331,7 @@ func main() {
 			fatalf("%v", err)
 		}
 		if len(pos) != 2 {
-			fmt.Fprintf(os.Stderr, "usage: zstream listen <port> <key> [options]\n")
+			fmt.Fprintf(os.Stderr, "usage: cs-stream listen <port> <key> [options]\n")
 			os.Exit(1)
 		}
 		if len(pos[1]) < 8 {
@@ -344,7 +344,7 @@ func main() {
 			fatalf("%v", err)
 		}
 		if len(pos) != 3 {
-			fmt.Fprintf(os.Stderr, "usage: zstream send <host> <port> <key> [options]\n")
+			fmt.Fprintf(os.Stderr, "usage: cs-stream send <host> <port> <key> [options]\n")
 			os.Exit(1)
 		}
 		if len(pos[2]) < 8 {
@@ -358,7 +358,7 @@ func main() {
 			fatalf("%v", err)
 		}
 		if len(pos) != 2 {
-			fmt.Fprintf(os.Stderr, "usage: zstream tunnel-listen <port> <key> --local=ADDR [options] -- <cmd> [args...]\n")
+			fmt.Fprintf(os.Stderr, "usage: cs-stream tunnel-listen <port> <key> --local=ADDR [options] -- <cmd> [args...]\n")
 			os.Exit(1)
 		}
 		if len(pos[1]) < 8 {
@@ -378,7 +378,7 @@ func main() {
 			fatalf("%v", err)
 		}
 		if len(pos) != 3 {
-			fmt.Fprintf(os.Stderr, "usage: zstream tunnel-send <host> <port> <key> --local=ADDR [options] -- <cmd> [args...]\n")
+			fmt.Fprintf(os.Stderr, "usage: cs-stream tunnel-send <host> <port> <key> --local=ADDR [options] -- <cmd> [args...]\n")
 			os.Exit(1)
 		}
 		if len(pos[2]) < 8 {
@@ -392,7 +392,7 @@ func main() {
 		}
 		doTunnelSend(pos[0], pos[1], pos[2], opts, childArgs)
 	case "version", "--version", "-v":
-		fmt.Printf("zstream %s\n", version)
+		fmt.Printf("cs-stream %s\n", version)
 	default:
 		usage()
 		os.Exit(1)
@@ -400,13 +400,13 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "zstream %s -- encrypted TCP stream transport for ZFS replication\n\n", version)
+	fmt.Fprintf(os.Stderr, "cs-stream %s -- encrypted TCP stream transport for ZFS replication\n\n", version)
 	fmt.Fprintf(os.Stderr, "Usage:\n")
-	fmt.Fprintf(os.Stderr, "  zstream listen <port> <key> [options]          listen and decrypt to stdout\n")
-	fmt.Fprintf(os.Stderr, "  zstream send   <host> <port> <key> [options]   encrypt stdin and send\n")
-	fmt.Fprintf(os.Stderr, "  zstream tunnel-listen <port> <key> --local=ADDR -- <cmd>   spawn cmd, proxy to ADDR\n")
-	fmt.Fprintf(os.Stderr, "  zstream tunnel-send <host> <port> <key> --local=ADDR -- <cmd>   spawn cmd, proxy from ADDR\n")
-	fmt.Fprintf(os.Stderr, "  zstream version                                print version\n\n")
+	fmt.Fprintf(os.Stderr, "  cs-stream listen <port> <key> [options]          listen and decrypt to stdout\n")
+	fmt.Fprintf(os.Stderr, "  cs-stream send   <host> <port> <key> [options]   encrypt stdin and send\n")
+	fmt.Fprintf(os.Stderr, "  cs-stream tunnel-listen <port> <key> --local=ADDR -- <cmd>   spawn cmd, proxy to ADDR\n")
+	fmt.Fprintf(os.Stderr, "  cs-stream tunnel-send <host> <port> <key> --local=ADDR -- <cmd>   spawn cmd, proxy from ADDR\n")
+	fmt.Fprintf(os.Stderr, "  cs-stream version                                print version\n\n")
 	fmt.Fprintf(os.Stderr, "Options:\n")
 	fmt.Fprintf(os.Stderr, "  --buf=SIZE      read-ahead buffer (default 128m, 0=off)  e.g. --buf=256m\n")
 	fmt.Fprintf(os.Stderr, "  --rate=SPEED    throughput limit (default off)           e.g. --rate=50m\n")
@@ -416,12 +416,12 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "  --local=ADDR    tunnel mode: local address for the wrapped child process\n\n")
 	fmt.Fprintf(os.Stderr, "Example:\n")
 	fmt.Fprintf(os.Stderr, "  # Receiver:\n")
-	fmt.Fprintf(os.Stderr, "  zstream listen 9000 MYKEY | zfs receive -F tank/backup\n\n")
+	fmt.Fprintf(os.Stderr, "  cs-stream listen 9000 MYKEY | zfs receive -F tank/backup\n\n")
 	fmt.Fprintf(os.Stderr, "  # Sender (rate-limited, with log):\n")
-	fmt.Fprintf(os.Stderr, "  zfs send tank@snap | zstream send 192.168.1.10 9000 MYKEY --rate=100m --log=/tmp/zstream.log\n\n")
+	fmt.Fprintf(os.Stderr, "  zfs send tank@snap | cs-stream send 192.168.1.10 9000 MYKEY --rate=100m --log=/tmp/cs-stream.log\n\n")
 	fmt.Fprintf(os.Stderr, "  # Tunnel (rclone-over-sftp folder sync):\n")
-	fmt.Fprintf(os.Stderr, "  zstream tunnel-listen 9100 MYKEY --local=127.0.0.1:9101 -- rclone serve sftp /data --addr 127.0.0.1:9101\n")
-	fmt.Fprintf(os.Stderr, "  zstream tunnel-send HOST 9100 MYKEY --local=127.0.0.1:9101 -- rclone sync /src :sftp: --sftp-host=127.0.0.1 --sftp-port=9101\n")
+	fmt.Fprintf(os.Stderr, "  cs-stream tunnel-listen 9100 MYKEY --local=127.0.0.1:9101 -- rclone serve sftp /data --addr 127.0.0.1:9101\n")
+	fmt.Fprintf(os.Stderr, "  cs-stream tunnel-send HOST 9100 MYKEY --local=127.0.0.1:9101 -- rclone sync /src :sftp: --sftp-host=127.0.0.1 --sftp-port=9101\n")
 }
 
 // deriveKey derives a 32-byte AES key from an arbitrary string via SHA-256.
@@ -641,7 +641,7 @@ func acceptRace(ln net.Listener, childDone <-chan struct{}, childErr *error, tim
 }
 
 // exitWithChildResult exits the process with the child's exit code, so a
-// caller checking zstream's own exit status sees the wrapped command's result.
+// caller checking cs-stream's own exit status sees the wrapped command's result.
 func exitWithChildResult(err error) {
 	if err == nil {
 		os.Exit(0)
@@ -692,7 +692,7 @@ func proxyEncryptStream(r io.Reader, w io.Writer, gcm cipher.AEAD) error {
 }
 
 // proxyDuplex relays bytes bidirectionally between localConn (plaintext,
-// the wrapped child process) and tunnelConn (encrypted, the peer zstream),
+// the wrapped child process) and tunnelConn (encrypted, the peer cs-stream),
 // using the same chunk framing as listen/send. Half-close is propagated in
 // both directions: when one side reaches EOF, the corresponding write side
 // of the other connection is closed, so a normal SFTP session (which closes
@@ -737,7 +737,7 @@ func proxyDuplex(localConn, tunnelConn net.Conn) error {
 }
 
 // currentGCM is set once per process before proxyDuplex is used. Tunnel mode
-// only ever uses a single cipher per process (one tunnel per zstream
+// only ever uses a single cipher per process (one tunnel per cs-stream
 // invocation), so a package-level var avoids threading it through both
 // proxy goroutines separately.
 var currentGCM cipher.AEAD
@@ -1218,7 +1218,7 @@ func decryptStream(r io.Reader, w io.Writer, gcm cipher.AEAD, counter *int64, rl
 // logf writes a timestamped message to stderr (not stdout -- stdout is data).
 func logf(format string, args ...interface{}) {
 	ts := time.Now().Format("2006.01.02 15:04:05")
-	fmt.Fprintf(os.Stderr, "%s  zstream  %s\n", ts, fmt.Sprintf(format, args...))
+	fmt.Fprintf(os.Stderr, "%s  cs-stream  %s\n", ts, fmt.Sprintf(format, args...))
 }
 
 func fatalf(format string, args ...interface{}) {

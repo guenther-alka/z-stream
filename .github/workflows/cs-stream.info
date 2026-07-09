@@ -1,15 +1,18 @@
 ================================================================================
-  zstream -- Encrypted TCP Stream Transport for ZFS Replication
+  cs-stream -- Encrypted TCP Stream Transport for ZFS Replication
   Replaces netcat (nc) in job-replicate.pl
-  Repository: https://github.com/guenther-alka/zstream
-  Version:    1.1.2
+  Repository: https://github.com/guenther-alka/cs-stream
+  Version:    2.0.0
+  Renamed from "zstream" as of v2.0.0 -- same wire protocol/CLI as
+  zstream v1.3.3, renamed to avoid clashing with the unrelated OpenZFS
+  tool of the same name.
 ================================================================================
 
 ================================================================================
   1. PURPOSE
 ================================================================================
-  zstream is a minimal cross-platform binary that replaces netcat (nc) in
-  ZFS send/receive replication pipelines. Unlike nc, zstream encrypts the
+  cs-stream is a minimal cross-platform binary that replaces netcat (nc) in
+  ZFS send/receive replication pipelines. Unlike nc, cs-stream encrypts the
   stream using AES-256-GCM authenticated encryption.
 
   Additional features (v1.1.0):
@@ -24,17 +27,17 @@
       Receiver: nc -l -p 9000 | zfs receive -F tank/backup
       Sender:   zfs send tank@snap | nc 192.168.1.10 9000
 
-    zstream (encrypted, defaults):
-      Receiver: zstream listen 9000 SESSIONKEY | zfs receive -F tank/backup
-      Sender:   zfs send tank@snap | zstream send 192.168.1.10 9000 SESSIONKEY
+    cs-stream (encrypted, defaults):
+      Receiver: cs-stream listen 9000 SESSIONKEY | zfs receive -F tank/backup
+      Sender:   zfs send tank@snap | cs-stream send 192.168.1.10 9000 SESSIONKEY
 
-    zstream (rate-limited, with progress and log):
-      Sender:   zfs send tank@snap | zstream send 192.168.1.10 9000 SESSIONKEY --rate=100m --progress --log=/tmp/zstream.log
+    cs-stream (rate-limited, with progress and log):
+      Sender:   zfs send tank@snap | cs-stream send 192.168.1.10 9000 SESSIONKEY --rate=100m --progress --log=/tmp/cs-stream.log
 
   The session key is generated per-transfer by job-replicate.pl:
     sha256_hex(time . $$ . $source_ip . $dest_ip . $snap)
   It is passed to both sides via the existing server.pl socket commands.
-  No key management needed in zstream itself.
+  No key management needed in cs-stream itself.
 
 ================================================================================
   2. ENCRYPTION
@@ -110,30 +113,32 @@
 
   --log=FILE      Append transfer summary to FILE after completion. Default: off.
                   Summary includes: mode, bytes transferred, time, speed, options.
-                  Example: --log=/tmp/zstream.log
+                  Example: --log=/tmp/cs-stream.log
                   Log line format:
-                    2026.06.26 14:30:00  zstream 1.1.2  mode=send  transferred=12.45 GB  time=02:45  speed=75.3 MB/s  buf=128 MB  rate=off
+                    2026.06.26 14:30:00  cs-stream 1.1.2  mode=send  transferred=12.45 GB  time=02:45  speed=75.3 MB/s  buf=128 MB  rate=off
 
 ================================================================================
   5. INSTALLATION (csweb-gui)
 ================================================================================
-  Binary location:
-    Linux / OmniOS / FreeBSD:  /opt/csweb-gui/_cfg/s3/bin/zstream
-    Windows:                   C:\opt\csweb-gui\_cfg\s3\bin\zstream.exe
+  Binary location (per-platform subfolder, <os> = mswin/linux/freebsd/
+  illumos/solaris/darwin):
+    Linux/OmniOS/FreeBSD/Solaris:  /opt/csweb-gui/data/cs_server/tools/cs-stream/<os>.amd64/cs-stream
+    Windows:                       C:\opt\csweb-gui\data\cs_server\tools\cs-stream\mswin.amd64\cs-stream.exe
 
-  After download:
-    Linux / OmniOS / FreeBSD:  chmod +x /opt/csweb-gui/_cfg/s3/bin/zstream
-    Windows:                   no chmod needed
+  After manual placement:
+    Linux/OmniOS/FreeBSD/Solaris:  chmod +x .../cs-stream
+    Windows:                       no chmod needed
 
-  Download via csweb-gui:
-    Pools > S3 Pool > S3 Local Server > Download zstream
-    (same mechanism as rclone/restic download)
+  csweb-gui deploys and self-heals this automatically per member
+  (job-filesync.pl / job-replicate.pl check for it and push it from the
+  admin host's own local copy if missing) -- manual placement is only
+  needed to seed the admin host itself with a new version.
 
   Direct download from GitHub Releases:
-    https://github.com/guenther-alka/zstream/releases/latest/download/zstream-linux-amd64
-    https://github.com/guenther-alka/zstream/releases/latest/download/zstream-windows-amd64.exe
-    https://github.com/guenther-alka/zstream/releases/latest/download/zstream-freebsd-amd64
-    https://github.com/guenther-alka/zstream/releases/latest/download/zstream-solaris-amd64
+    https://github.com/guenther-alka/cs-stream/releases/latest/download/cs-stream-linux-amd64
+    https://github.com/guenther-alka/cs-stream/releases/latest/download/cs-stream-windows-amd64.exe
+    https://github.com/guenther-alka/cs-stream/releases/latest/download/cs-stream-freebsd-amd64
+    https://github.com/guenther-alka/cs-stream/releases/latest/download/cs-stream-solaris-amd64
 
 ================================================================================
   6. BUILD FROM SOURCE
@@ -147,30 +152,30 @@
     go version
 
   Clone repository:
-    git clone https://github.com/guenther-alka/zstream.git
-    cd zstream
+    git clone https://github.com/guenther-alka/cs-stream.git
+    cd cs-stream
 
   ----------------------------------------------------------------------------
   4a. BUILD ON LINUX (amd64)
   ----------------------------------------------------------------------------
-    go build -o zstream .
-    chmod +x zstream
-    ./zstream version
+    go build -o cs-stream .
+    chmod +x cs-stream
+    ./cs-stream version
 
   Build for all platforms from Linux:
-    GOOS=linux   GOARCH=amd64  go build -o zstream-linux-amd64  .
-    GOOS=linux   GOARCH=arm64  go build -o zstream-linux-arm64  .
-    GOOS=windows GOARCH=amd64  go build -o zstream-windows-amd64.exe .
-    GOOS=freebsd GOARCH=amd64  go build -o zstream-freebsd-amd64 .
-    GOOS=solaris GOARCH=amd64  go build -o zstream-solaris-amd64 .
-    GOOS=darwin  GOARCH=amd64  go build -o zstream-darwin-amd64 .
-    GOOS=darwin  GOARCH=arm64  go build -o zstream-darwin-arm64 .
+    GOOS=linux   GOARCH=amd64  go build -o cs-stream-linux-amd64  .
+    GOOS=linux   GOARCH=arm64  go build -o cs-stream-linux-arm64  .
+    GOOS=windows GOARCH=amd64  go build -o cs-stream-windows-amd64.exe .
+    GOOS=freebsd GOARCH=amd64  go build -o cs-stream-freebsd-amd64 .
+    GOOS=solaris GOARCH=amd64  go build -o cs-stream-solaris-amd64 .
+    GOOS=darwin  GOARCH=amd64  go build -o cs-stream-darwin-amd64 .
+    GOOS=darwin  GOARCH=arm64  go build -o cs-stream-darwin-arm64 .
 
   CGO_ENABLED=0 is recommended for maximum portability (pure Go binary):
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o zstream .
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o cs-stream .
 
   Strip debug info for smaller binary (~30% smaller):
-    go build -ldflags="-s -w" -o zstream .
+    go build -ldflags="-s -w" -o cs-stream .
 
   ----------------------------------------------------------------------------
   4b. BUILD ON WINDOWS (amd64)
@@ -178,13 +183,13 @@
   Install Go from https://go.dev/dl/ (Windows installer, amd64)
   Open PowerShell or cmd.exe:
 
-    cd zstream
-    go build -o zstream.exe .
-    .\zstream.exe version
+    cd cs-stream
+    go build -o cs-stream.exe .
+    .\cs-stream.exe version
 
   Cross-compile for Linux from Windows:
     $env:GOOS="linux"; $env:GOARCH="amd64"; $env:CGO_ENABLED="0"
-    go build -o zstream-linux-amd64 .
+    go build -o cs-stream-linux-amd64 .
 
   ----------------------------------------------------------------------------
   4c. BUILD ON OMNIOS / ILLUMOS (amd64)
@@ -195,12 +200,12 @@
     Download from https://go.dev/dl/ (linux-amd64 binary works on OmniOS)
 
   Note: OmniOS uses the Solaris syscall interface. Build with GOOS=solaris:
-    GOOS=solaris GOARCH=amd64 CGO_ENABLED=0 go build -o zstream .
-    chmod +x zstream
-    ./zstream version
+    GOOS=solaris GOARCH=amd64 CGO_ENABLED=0 go build -o cs-stream .
+    chmod +x cs-stream
+    ./cs-stream version
 
   If building on OmniOS for OmniOS, plain go build also works:
-    go build -o zstream .
+    go build -o cs-stream .
 
   ----------------------------------------------------------------------------
   4d. BUILD ON FREEBSD (amd64)
@@ -210,9 +215,9 @@
     -- or --
     Download from https://go.dev/dl/ (freebsd-amd64)
 
-    go build -o zstream .
-    chmod +x zstream
-    ./zstream version
+    go build -o cs-stream .
+    chmod +x cs-stream
+    ./cs-stream version
 
   ----------------------------------------------------------------------------
   4e. BUILD ON MACOS (amd64 / Apple Silicon)
@@ -220,13 +225,13 @@
   Install Go from https://go.dev/dl/ or via Homebrew:
     brew install go
 
-    go build -o zstream .
-    chmod +x zstream
-    ./zstream version
+    go build -o cs-stream .
+    chmod +x cs-stream
+    ./cs-stream version
 
   Cross-compile for Apple Silicon from Intel Mac (or vice versa):
-    GOARCH=arm64 go build -o zstream-arm64 .
-    GOARCH=amd64 go build -o zstream-amd64 .
+    GOARCH=arm64 go build -o cs-stream-arm64 .
+    GOARCH=amd64 go build -o cs-stream-amd64 .
 
 ================================================================================
   7. AUTOMATED BUILD VIA GITHUB ACTIONS
@@ -244,16 +249,16 @@
     6. A GitHub Release is created automatically with all binaries attached
 
     7. Download URLs become available:
-         https://github.com/guenther-alka/zstream/releases/latest/download/FILENAME
+         https://github.com/guenther-alka/cs-stream/releases/latest/download/FILENAME
 
   Platforms built by GitHub Actions:
-    zstream-linux-amd64
-    zstream-linux-arm64
-    zstream-windows-amd64.exe
-    zstream-freebsd-amd64
-    zstream-solaris-amd64
-    zstream-darwin-amd64
-    zstream-darwin-arm64
+    cs-stream-linux-amd64
+    cs-stream-linux-arm64
+    cs-stream-windows-amd64.exe
+    cs-stream-freebsd-amd64
+    cs-stream-solaris-amd64
+    cs-stream-darwin-amd64
+    cs-stream-darwin-arm64
 
   No local Go installation needed for releases -- GitHub provides the build
   environment. Only needed if you want to build and test locally first.
@@ -264,49 +269,51 @@
   Quick test (same machine, two terminals):
 
   Terminal 1 (receiver):
-    zstream listen 9001 testkey123 > /tmp/received.bin
+    cs-stream listen 9001 testkey123 > /tmp/received.bin
 
   Terminal 2 (sender):
-    echo "hello zstream" | zstream send 127.0.0.1 9001 testkey123
+    echo "hello cs-stream" | cs-stream send 127.0.0.1 9001 testkey123
 
   Check result:
     cat /tmp/received.bin
-    # should print: hello zstream
+    # should print: hello cs-stream
 
   ZFS test (requires two members):
     # On destination member:
-    zstream listen 9000 TESTKEY | zfs receive -F tank/backup
+    cs-stream listen 9000 TESTKEY | zfs receive -F tank/backup
 
     # On source member:
-    zfs send tank@testsnap | zstream send DEST_IP 9000 TESTKEY
+    zfs send tank@testsnap | cs-stream send DEST_IP 9000 TESTKEY
 
   Wrong key test (should fail with auth error):
-    Terminal 1: zstream listen 9001 correctkey > /tmp/out
-    Terminal 2: echo "data" | zstream send 127.0.0.1 9001 wrongkey
+    Terminal 1: cs-stream listen 9001 correctkey > /tmp/out
+    Terminal 2: echo "data" | cs-stream send 127.0.0.1 9001 wrongkey
     # Receiver exits with: decrypt/auth failed -- wrong key or corrupted data
 
 ================================================================================
   9. INTEGRATION IN csweb-gui (job-replicate.pl)
 ================================================================================
   Binary path:
-    $wpath/_cfg/s3/bin/zstream        (Linux/OmniOS/FreeBSD)
-    $wpath/_cfg/s3/bin/zstream.exe    (Windows)
+    $wpath/data/cs_server/tools/cs-stream/<os>.amd64/cs-stream        (Linux/OmniOS/FreeBSD/Solaris)
+    $wpath/data/cs_server/tools/cs-stream/mswin.amd64/cs-stream.exe   (Windows)
 
-  job-replicate.pl checks for zstream at job start.
-  If not found: error with download hint (no nc fallback).
+  job-replicate.pl / job-filesync.pl self-heal-deploy cs-stream from the
+  admin host's own local copy if missing on a member (see
+  _zstream_ensure_binary() -- internal sub/variable names keep the old
+  "zstream" identifiers for now, only the binary filename/path changed).
 
   Session key generation (per transfer):
     use Digest::SHA::PurePerl qw(sha256_hex);
     my $session_key = sha256_hex(time() . $$ . $source_ip . $dest_ip . $snap);
 
   Listener command (destination member):
-    "$zstream listen $port $session_key | zfs receive -F $dest_fs"
+    "$bin listen $port $session_key | zfs receive -F $dest_fs"
 
   Sender command (source member):
-    "zfs send $snap | $zstream send $dest_ip $port $session_key"
+    "zfs send $snap | $bin send $dest_ip $port $session_key"
 
   Windows path:
-    $zstream = "$wpath/_cfg/s3/bin/zstream.exe"
+    $bin = "$wpath/data/cs_server/tools/cs-stream/mswin.amd64/cs-stream.exe"
     Path uses forward slashes (Perl + server.pl handle conversion)
 
   Port:
@@ -338,7 +345,7 @@
     Connection reset:  Read() returns EOF -> exit with partial data warning
 
   No compression: ZFS send output is already compressed (LZ4/ZSTD/GZIP
-  depending on dataset compression setting). Adding compression in zstream
+  depending on dataset compression setting). Adding compression in cs-stream
   would give no benefit and add CPU overhead.
 
 ================================================================================

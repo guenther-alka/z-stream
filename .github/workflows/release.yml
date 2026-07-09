@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    name: Build zstream
+    name: Build cs-stream
     runs-on: ubuntu-latest
 
     strategy:
@@ -15,28 +15,28 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
-            output: zstream-linux-amd64
+            output: cs-stream-linux-amd64
           - goos: linux
             goarch: arm64
-            output: zstream-linux-arm64
+            output: cs-stream-linux-arm64
           - goos: windows
             goarch: amd64
-            output: zstream-windows-amd64.exe
+            output: cs-stream-windows-amd64.exe
           - goos: freebsd
             goarch: amd64
-            output: zstream-freebsd-amd64
+            output: cs-stream-freebsd-amd64
           - goos: illumos
             goarch: amd64
-            output: zstream-illumos-amd64
+            output: cs-stream-illumos-amd64
           - goos: solaris
             goarch: amd64
-            output: zstream-solaris-amd64
+            output: cs-stream-solaris-amd64
           - goos: darwin
             goarch: amd64
-            output: zstream-darwin-amd64
+            output: cs-stream-darwin-amd64
           - goos: darwin
             goarch: arm64
-            output: zstream-darwin-arm64
+            output: cs-stream-darwin-arm64
 
     steps:
       - name: Checkout
@@ -82,55 +82,62 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: zstream ${{ github.ref_name }}
+          name: cs-stream ${{ github.ref_name }}
           body: |
-            ## zstream ${{ github.ref_name }}
+            ## cs-stream ${{ github.ref_name }}
 
             Encrypted TCP stream transport for ZFS replication and folder sync.
             Replaces netcat in ZFS send/receive pipelines.
-            New in v1.3.0: tunnel-listen/tunnel-send for bidirectional encrypted proxy (e.g. rclone), with required --local=ADDR.
-            Used by csweb-gui job-replicate for encrypted ZFS send/receive.
+            Renamed from "zstream" as of v2.0.0 (avoids clashing with the
+            unrelated OpenZFS tool of the same name) -- functionally identical
+            to zstream v1.3.3, same wire protocol and CLI.
+            tunnel-listen/tunnel-send provide a bidirectional encrypted proxy
+            (e.g. for rclone), with required --local=ADDR.
+            Used by csweb-gui job-replicate and job-filesync for encrypted
+            ZFS send/receive and rclone-over-SFTP folder sync.
 
             ### Downloads
 
             | Platform | File |
             |----------|------|
-            | Linux x86_64 | `zstream-linux-amd64` |
-            | Linux ARM64 | `zstream-linux-arm64` |
-            | Windows x86_64 | `zstream-windows-amd64.exe` |
-            | FreeBSD x86_64 | `zstream-freebsd-amd64` |
-            | OmniOS/Illumos x86_64 | `zstream-illumos-amd64` |
-            | Oracle Solaris x86_64 | `zstream-solaris-amd64` |
-            | macOS x86_64 | `zstream-darwin-amd64` |
-            | macOS Apple Silicon | `zstream-darwin-arm64` |
+            | Linux x86_64 | `cs-stream-linux-amd64` |
+            | Linux ARM64 | `cs-stream-linux-arm64` |
+            | Windows x86_64 | `cs-stream-windows-amd64.exe` |
+            | FreeBSD x86_64 | `cs-stream-freebsd-amd64` |
+            | OmniOS/Illumos x86_64 | `cs-stream-illumos-amd64` |
+            | Oracle Solaris x86_64 | `cs-stream-solaris-amd64` |
+            | macOS x86_64 | `cs-stream-darwin-amd64` |
+            | macOS Apple Silicon | `cs-stream-darwin-arm64` |
 
             ### Usage
             ```
             # Receiver (start first):
-            zstream listen 9000 SESSIONKEY | zfs receive -F tank/backup
+            cs-stream listen 9000 SESSIONKEY | zfs receive -F tank/backup
 
             # Sender:
-            zfs send tank@snap | zstream send 192.168.1.10 9000 SESSIONKEY
+            zfs send tank@snap | cs-stream send 192.168.1.10 9000 SESSIONKEY
             ```
 
-            ### Tunnel mode (new in v1.3.0)
+            ### Tunnel mode
             ```
             # Folder sync via rclone over encrypted tunnel.
             # --local=ADDR is required: the local address the wrapped child
             # process binds to (tunnel-listen) or connects to (tunnel-send).
 
             # Receiver (start first):
-            zstream tunnel-listen 9000 KEY --local=127.0.0.1:2222 -- rclone serve sftp /dst --addr 127.0.0.1:2222
+            cs-stream tunnel-listen 9000 KEY --local=127.0.0.1:2222 -- rclone serve sftp /dst --addr 127.0.0.1:2222
 
             # Sender:
-            zstream tunnel-send HOST 9000 KEY --local=127.0.0.1:2222 -- rclone sync /src :sftp: --sftp-host=127.0.0.1 --sftp-port=2222
+            cs-stream tunnel-send HOST 9000 KEY --local=127.0.0.1:2222 -- rclone sync /src :sftp: --sftp-host=127.0.0.1 --sftp-port=2222
             ```
 
             ### Install (csweb-gui)
             Download the binary for your platform and place it in:
-            - Linux/OmniOS/BSD: `/opt/csweb-gui/_cfg/s3/bin/zstream`
-            - Windows: `C:\opt\csweb-gui\_cfg\s3\bin\zstream.exe`
-            - chmod +x on Linux/BSD/OmniOS
+            - Linux/OmniOS/BSD/Solaris: `/opt/csweb-gui/data/cs_server/tools/cs-stream/<os>.amd64/cs-stream`
+            - Windows: `C:\opt\csweb-gui\data\cs_server\tools\cs-stream\mswin.amd64\cs-stream.exe`
+            - chmod +x on Linux/BSD/OmniOS/Solaris
+            csweb-gui deploys and updates this automatically per member; manual
+            placement is only needed for a fresh member never seen by the admin host.
           files: artifacts/*
           draft: false
           prerelease: false

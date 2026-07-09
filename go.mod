@@ -1,3 +1,3 @@
-module github.com/napp-it/zstream
+module github.com/napp-it/cs-stream
 
 go 1.21
