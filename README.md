@@ -31,6 +31,18 @@ zfs send tank@snap | cs-stream send 192.168.1.10 9000 SESSIONKEY --rate=100m --p
 | `--log=FILE` | off | Append transfer summary to file |
 | `--bind=IP` | `0.0.0.0` | Bind listener to specific IP |
 
+### Tunnel mode
+```
+# Folder sync via rclone over encrypted tunnel.
+# --local=ADDR is required: the local address the wrapped child
+# process binds to (tunnel-listen) or connects to (tunnel-send).
+
+# Receiver (start first):
+cs-stream tunnel-listen 9000 KEY --local=127.0.0.1:2222 -- rclone serve sftp /dst --addr 127.0.0.1:2222
+
+# Sender:
+cs-stream tunnel-send HOST 9000 KEY --local=127.0.0.1:2222 -- rclone sync /src :sftp: --sftp-host=127.0.0.1 --sftp-port=2222
+```
 ## Encryption
 
 - **AES-256-GCM** authenticated encryption (Go stdlib, AES-NI accelerated)
